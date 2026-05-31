@@ -5,7 +5,7 @@ from configs.config_env import EnvConfig
 @dataclass(frozen=True, kw_only=True)
 class PPOConfig(EnvConfig):
     total_updates: int = 1_000
-    rollout_steps: int = 2_000
+    rollout_steps: int = 4_000
     minibatch_size: int = 10_000
     batch_size: int = field(init=False)
     frame_stack_size: int = 3

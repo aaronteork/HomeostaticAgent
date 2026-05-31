@@ -15,7 +15,7 @@ from utils.utils_env import CustomFrameStackObservation
 def eval_ymaze_ppo():
     # Create configs
     ymaze_cfg = YMazeConfig(
-        render_mode="human", image_size=(512, 512), is_training=False
+        render_mode="rgbd_tuple", image_size=(512, 512), is_training=False
     )
     ppo_cfg = PPOConfig(is_training=False)
 
@@ -27,7 +27,7 @@ def eval_ymaze_ppo():
 
     # Create agent and load model
     agent = HomeostaticPPO(ppo_cfg)
-    model = torch.load("./models/PPO_final.pt")
+    model = torch.load("./models/PPO_4000_rollout.pt")
     agent.load_state_dict(model)
     agent.to(ppo_cfg.device)
     agent.eval()
