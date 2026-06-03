@@ -178,15 +178,14 @@ class YMazeTestEnv(AntEnv, EzPickle):
             angle_rad = np.arctan2(p2[1] - p1[1], p2[0] - p1[0])
             angle_deg = np.degrees(angle_rad)
 
-            h = self.cfg.wall_height
             t = self.cfg.wall_thickness
 
             ET.SubElement(
                 worldbody, "geom",
                 dict(wall_attrs,
                      name=name,
-                     pos=f"{center[0]:.4f} {center[1]:.4f} {h / 2:.4f}",
-                     size=f"{length / 2:.4f} {t / 2:.4f} {h / 2:.4f}",
+                     pos=f"{center[0]:.4f} {center[1]:.4f} 0.5000",
+                     size=f"{length / 2:.4f} {t / 2:.4f} 2.0000",
                      euler=f"0 0 {angle_deg:.4f}",
                 ),
             )

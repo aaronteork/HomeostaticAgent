@@ -18,11 +18,10 @@ class YMazeConfig(EnvConfig):
     render_mode: str = "rgb_array"
 
     # Y-maze geometry
-    stem_length: float = 6.0          # Length of the stem corridor behind the junction
-    arm_length: float = 7.0           # Length of each arm from the junction
+    stem_length: float = 5.0          # Length of the stem corridor behind the junction
+    arm_length: float = 6.0           # Length of each arm from the junction
     corridor_width: float = 4.0       # Width of the corridors
     fork_half_angle_deg: float = 40.0 # Half-angle of the Y fork (degrees from forward)
-    wall_height: float = 2.0          # Height of the corridor walls
     wall_thickness: float = 0.2       # Thickness of the corridor walls
     resource_offset: float = 1.0      # Distance from arm end cap to resource center
 
@@ -31,10 +30,10 @@ class YMazeConfig(EnvConfig):
 
     # Internal state initialization
     # Primary need is more depleted (more negative), secondary is less depleted
-    primary_need_low: float = -0.45
-    primary_need_high: float = -0.25
-    secondary_need_low: float = -0.20
-    secondary_need_high: float = -0.05
+    primary_need_low: float = -0.1  # -0.45
+    primary_need_high: float = -0.05  # -0.25
+    secondary_need_low: float = 0.05 # -0.20
+    secondary_need_high: float = 0.1 # -0.05
 
     # Test settings
     randomize_arms: bool = True  # Whether to randomize which arm has food vs water each episode
