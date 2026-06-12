@@ -121,8 +121,15 @@ class HomeostaticPPO(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.vision_encoder = VisionEncoder()
+        
+        # Calculate the output dimension of the vision encoder to set the input size of the projection layer
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, 12, 64, 64)  # Assuming input images are (C=12, H=64, W=64)
+            vision_output = self.vision_encoder(dummy_input)
+            vision_output_dim = vision_output.shape[-1]
+
         self.vision_proj = nn.Sequential(
-            nn.LazyLinear(cfg.image_latent_dim),
+            nn.Linear(vision_output_dim, cfg.image_latent_dim),
             nn.LayerNorm(cfg.image_latent_dim),
             nn.Tanh()
         )
