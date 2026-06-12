@@ -23,6 +23,7 @@ class PPOConfig(EnvConfig):
     gamma: float = 0.99
     gae_lambda: float = 0.95
     target_kl: float = 0.02
+    image_latent_dim: int = 200
 
     def __post_init__(self):
         temp_batch_size = self.rollout_steps * self.num_workers

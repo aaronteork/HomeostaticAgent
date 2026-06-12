@@ -121,6 +121,12 @@ class HomeostaticPPO(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.vision_encoder = VisionEncoder()
+        self.vision_proj = nn.Sequential(
+            nn.LazyLinear(cfg.image_latent_dim),
+            nn.LayerNorm(cfg.image_latent_dim),
+            nn.Tanh()
+        )
+
         self.actor = PPOActorNetwork(cfg)
         self.critic = PPOCriticNetwork(cfg)
 
@@ -136,6 +142,7 @@ class HomeostaticPPO(nn.Module):
             internal_state = torch.from_numpy(internal_state).to(self.cfg.device)
 
         vision = self.vision_encoder(vision)
+        vision = self.vision_proj(vision)
 
         if evaluate_actions is not None:
             # Training mode: evaluate actions and return (log_prob, entropy)
@@ -157,19 +164,14 @@ class HomeostaticPPO(nn.Module):
 
 
 class PPOActorNetwork(nn.Module):
-    def __init__(self, cfg_or_action_dim=8):
+    def __init__(self, cfg):
         super().__init__()
-        if isinstance(cfg_or_action_dim, int):
-            action_dim = cfg_or_action_dim
-            input_dim = 200 + 27 + 2
-            self.cfg = None
-        else:
-            self.cfg = cfg_or_action_dim
-            action_dim = self.cfg.action_space_dim
-            internal_state_dim = 3 if self.cfg.num_heat > 0 else 2
-            heat_sensor_dim = 3 if self.cfg.num_heat > 0 else 0
-            input_dim = 200 + self.cfg.obs_space_dim + internal_state_dim + heat_sensor_dim
-            
+        self.cfg = cfg
+        action_dim = self.cfg.action_space_dim
+        internal_state_dim = 3 if self.cfg.num_heat > 0 else 2
+        heat_sensor_dim = 3 if self.cfg.num_heat > 0 else 0
+        input_dim = self.cfg.image_latent_dim + self.cfg.obs_space_dim + internal_state_dim + heat_sensor_dim
+
         self.net = nn.Sequential(
             nn.Linear(input_dim, 300),
             nn.Tanh(),
@@ -215,11 +217,11 @@ class PPOCriticNetwork(nn.Module):
         super().__init__()
         self.cfg = cfg
         if cfg is None:
-            input_dim = 200 + 27 + 2
+            input_dim = cfg.image_latent_dim + cfg.obs_space_dim + 2
         else:
             internal_state_dim = 3 if cfg.num_heat > 0 else 2
             heat_sensor_dim = 3 if cfg.num_heat > 0 else 0
-            input_dim = 200 + cfg.obs_space_dim + internal_state_dim + heat_sensor_dim
+            input_dim = cfg.image_latent_dim + cfg.obs_space_dim + internal_state_dim + heat_sensor_dim
             
         self.net = nn.Sequential(
             nn.Linear(input_dim, 400),
