@@ -111,8 +111,15 @@ def train_ppo():
             # Get the value of the very last observation in your rollout
             trajectory = replay_buffer.sample(cfg.rollout_steps * cfg.num_workers)
 
+            # Keep observations on CPU for indexing, move scalar data to GPU for GAE
+            trajectory_for_gae = {
+                "rewards": trajectory["rewards"].to(cfg.device),
+                "values": trajectory["values"].to(cfg.device),
+                "dones": trajectory["dones"].to(cfg.device),
+            }
+
             # Reshape for GAE computation, then flatten back
-            trajectory_reshaped = reshape_trajectory(trajectory, cfg.rollout_steps, cfg.num_workers)
+            trajectory_reshaped = reshape_trajectory(trajectory_for_gae, cfg.rollout_steps, cfg.num_workers)
             advantages, returns = compute_gae_from_buffer(
                 rewards=trajectory_reshaped["rewards"],
                 values=trajectory_reshaped["values"],
