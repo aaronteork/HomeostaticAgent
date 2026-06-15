@@ -12,7 +12,7 @@ from utils.vision_encoder import VisionEncoder
 
 def create_replay_buffer(config):
     replay_buffer = TensorDictReplayBuffer(
-        storage=ListStorage(device=config.device),
+        storage=ListStorage(device="cpu"),  # Store on CPU to avoid GPU memory accumulation
         sampler=SamplerWithoutReplacement(shuffle=False),
         # batch_size=config.minibatch_size,
     )

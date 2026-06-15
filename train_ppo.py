@@ -271,6 +271,10 @@ def train_ppo():
 
             replay_buffer.empty()
 
+            # Clear GPU cache to prevent memory accumulation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
     model_path = f"./models/ppo_agent_{dt.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.pt"
     torch.save(agent.state_dict(), model_path)
     print(f"model saved to {model_path}")
