@@ -41,6 +41,54 @@ class VisionEncoder(nn.Module):
         return features
 
 
+class VisionDecoder(nn.Module):
+    """
+    Mirror image of the VisionEncoder.
+    Upsamples flattened features back to image space.
+    """
+    def __init__(self, feature_dim, output_channels=4, depth=16, output_shape=(64, 64)):
+        super().__init__()
+        self.output_shape = output_shape
+        self.output_channels = output_channels
+
+        # 1. Project flattened features back to spatial dimensions
+        # Assuming the last conv layer of encoder was (depth*4) channels at 1/16 spatial scale
+        self.feature_map_size = (depth * 4, output_shape[0] // 16, output_shape[1] // 16)
+        self.fc = nn.Linear(feature_dim, self.feature_map_size[0] * self.feature_map_size[1] * self.feature_map_size[2])
+        
+        # 2. Upsampling hierarchy
+        # Needs to reverse compared to the encoder
+        self.convnet = nn.Sequential(
+            # Stage 4 -> 3
+            LayerNormChannelLast(depth * 4),
+            nn.SiLU(),            
+            nn.ConvTranspose2d(depth * 4, depth * 4, kernel_size=4, stride=2, padding=1, bias=False),
+            
+            # Stage 3 -> 2
+            LayerNormChannelLast(depth * 4),
+            nn.SiLU(),
+            nn.ConvTranspose2d(depth * 4, depth * 3, kernel_size=4, stride=2, padding=1, bias=False),
+            
+            # Stage 2 -> 1
+            LayerNormChannelLast(depth * 3),
+            nn.SiLU(),
+            nn.ConvTranspose2d(depth * 3, depth * 2, kernel_size=4, stride=2, padding=1, bias=False),
+            
+            # Stage 1 -> Output
+            LayerNormChannelLast(depth * 2),
+            nn.SiLU(),
+            nn.ConvTranspose2d(depth * 2, output_channels, kernel_size=4, stride=2, padding=1, bias=False)
+        )
+
+    def forward(self, x):
+        # Project and reshape
+        x = self.fc(x)
+        x = x.view(x.size(0), *self.feature_map_size)
+        
+        # Upsample
+        return self.convnet(x)
+
+
 class LayerNormChannelLast(nn.LayerNorm):
     """Obtained from SheepRL"""
     def __init__(self, *args, **kwargs) -> None:
