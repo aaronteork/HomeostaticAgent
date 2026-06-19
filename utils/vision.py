@@ -19,20 +19,20 @@ class VisionEncoder(nn.Module):
         # 1. Feature Extraction: 4-stage hierarchy
         self.convnet = nn.Sequential(
             nn.Conv2d(input_channels, depth * 2, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.SiLU(),
             LayerNormChannelLast(depth * 2),
+            nn.SiLU(),
             
             nn.Conv2d(depth * 2, depth * 3, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.SiLU(),
             LayerNormChannelLast(depth * 3),
+            nn.SiLU(),
             
             nn.Conv2d(depth * 3, depth * 4, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.SiLU(),
             LayerNormChannelLast(depth * 4),
+            nn.SiLU(),
             
             nn.Conv2d(depth * 4, depth * 4, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.SiLU(),
             LayerNormChannelLast(depth * 4),
+            nn.SiLU(),
             nn.Flatten()
         )
 
@@ -60,24 +60,24 @@ class VisionDecoder(nn.Module):
         # Needs to reverse compared to the encoder
         self.convnet = nn.Sequential(
             # Stage 4 -> 3
+            nn.ConvTranspose2d(depth * 4, depth * 4, kernel_size=4, stride=2, padding=1, bias=False),
             LayerNormChannelLast(depth * 4),
             nn.SiLU(),            
-            nn.ConvTranspose2d(depth * 4, depth * 4, kernel_size=4, stride=2, padding=1, bias=False),
             
             # Stage 3 -> 2
-            LayerNormChannelLast(depth * 4),
-            nn.SiLU(),
             nn.ConvTranspose2d(depth * 4, depth * 3, kernel_size=4, stride=2, padding=1, bias=False),
-            
-            # Stage 2 -> 1
             LayerNormChannelLast(depth * 3),
             nn.SiLU(),
-            nn.ConvTranspose2d(depth * 3, depth * 2, kernel_size=4, stride=2, padding=1, bias=False),
             
-            # Stage 1 -> Output
+            # Stage 2 -> 1
+            nn.ConvTranspose2d(depth * 3, depth * 2, kernel_size=4, stride=2, padding=1, bias=False),
             LayerNormChannelLast(depth * 2),
             nn.SiLU(),
-            nn.ConvTranspose2d(depth * 2, output_channels, kernel_size=4, stride=2, padding=1, bias=False)
+            
+            # Stage 1 -> Output
+            nn.ConvTranspose2d(depth * 2, output_channels, kernel_size=4, stride=2, padding=1, bias=False),
+            LayerNormChannelLast(output_channels),
+            nn.SiLU(),
         )
 
     def forward(self, x):

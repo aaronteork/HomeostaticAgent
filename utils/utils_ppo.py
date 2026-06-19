@@ -7,7 +7,7 @@ from tensordict import TensorDict
 from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement
 
 from configs.config_ppo import PPOConfig
-from utils.vision_encoder import VisionEncoder
+from utils.vision import VisionEncoder
 
 
 def create_replay_buffer(config):
