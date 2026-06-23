@@ -4,10 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from torch.distributions import Normal, Beta, Independent
-from torchrl.data import ListStorage, TensorDictReplayBuffer
-from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement
-from tensordict import TensorDict
+from torch.distributions import Beta, Independent, OneHotCategoricalStraightThrough
 import numpy as np
 from collections import deque
 
@@ -30,34 +27,41 @@ class ObservationEncoder(nn.Module):
         self.config = config
 
         # Vision encoder
-        self.vision_encoder = VisionEncoder(channels=4, depth=config.base_cnn_channels)
+        self.vision_encoder = VisionEncoder(input_channels=4, depth=config.base_cnn_channels)
         # Get output dimension of vision encoder by passing a dummy input
         with torch.no_grad():
             dummy_input = torch.zeros(1, 4, 64, 64)
             vision_output_dim = self.vision_encoder(dummy_input).shape[-1]
 
         # Vector encoder for proprioception
-        self.proprioception_encoder = MLP(config, input_dims=config.obs_space_dim, output_dims=config.hidden_dim, num_layers=config.mlp_n_layers)
+        self.proprioception_encoder = MLP(config, input_dim=config.obs_space_dim, output_dim=config.hidden_dim, num_layers=config.mlp_n_layers)
 
         # Vector encoder for internal state
-        self.internal_state_encoder = MLP(config, input_dims=2 if config.num_heat == 0 else 3, output_dims=config.hidden_dim, num_layers=config.mlp_n_layers)
+        self.internal_state_encoder = MLP(config, input_dim=2 if config.num_heat == 0 else 3, output_dim=config.hidden_dim, num_layers=config.mlp_n_layers)
 
-        # Fusion layer
-        self.fusion = nn.Linear(vision_output_dim + config.hidden_dim + config.hidden_dim, config.encoder_dim)
+        self.output_dim = vision_output_dim + config.hidden_dim + config.hidden_dim
+        if self.output_dim != config.encoder_dim:
+            raise ValueError(f"Encoder output dim {self.output_dim} does not match config.encoder_dim {config.encoder_dim}")
 
         self._init_weights()
 
-    def forward(self, vision, proprioception, internal_state):
-        vision = torch.from_numpy(vision).to(self.config.device)
-        proprioception = torch.from_numpy(proprioception).to(self.config.device)
+    def forward(self, vision, proprioception=None, internal_state=None):
+        if isinstance(vision, dict):
+            obs = vision
+            vision = obs["vision"]
+            proprioception = obs["proprioception"]
+            internal_state = obs["internal_state"]
+
+        vision = to_tensor(vision, self.config.device)
+        proprioception = to_tensor(proprioception, self.config.device)
         proprioception = symlog(proprioception)
-        internal_state = torch.from_numpy(internal_state).to(self.config.device)
+        internal_state = to_tensor(internal_state, self.config.device)
         internal_state = symlog(internal_state)
 
         vision_embed = self.vision_encoder(vision)
         proprioception_embed = self.proprioception_encoder(proprioception)
         internal_state_embed = self.internal_state_encoder(internal_state)
-        return self.fusion(torch.cat([vision_embed, proprioception_embed, internal_state_embed], dim=-1))
+        return torch.cat([vision_embed, proprioception_embed, internal_state_embed], dim=-1)
 
     def _init_weights(self):
         for module in self.modules():
@@ -74,22 +78,26 @@ class ObservationDecoder(nn.Module):
         super().__init__()
         self.config = config
         # Vision decoder
-        self.vision_decoder = VisionDecoder(feature_dim=config.stochastic_units + config.recurrent_units, output_channels=4, depth=config.base_cnn_channels, output_shape=(64, 64))
+        self.vision_decoder = VisionDecoder(feature_dim=config.latent_dim, output_channels=4, depth=config.base_cnn_channels, output_shape=(64, 64))
         
         # Proprioception decoder
-        self.proprioception_decoder = MLP(config, input_dims=config.stochastic_units + config.recurrent_units, output_dims=config.hidden_dim, num_layers=config.mlp_n_layers)
+        self.proprioception_decoder = MLP(config, input_dim=config.latent_dim, output_dim=config.hidden_dim, num_layers=config.mlp_n_layers)
         self.proprioception_decoder_projection = nn.Linear(config.hidden_dim, config.obs_space_dim)  # Projection layer for proprioception
 
         # Internal state decoder
-        self.internal_state_decoder = MLP(config, input_dims=config.stochastic_units + config.recurrent_units, output_dims=config.hidden_dim, num_layers=config.mlp_n_layers)
+        self.internal_state_decoder = MLP(config, input_dim=config.latent_dim, output_dim=config.hidden_dim, num_layers=config.mlp_n_layers)
         self.internal_state_decoder_projection = nn.Linear(config.hidden_dim, 2 if config.num_heat == 0 else 3)  # Projection layer for internal state
 
         self._init_weights()
 
     def forward(self, latent):
-        latent = torch.from_numpy(latent).to(self.config.device)
+        latent = to_tensor(latent, self.config.device)
+        sequence_shape = latent.shape[:-1]
+        latent_flat = latent.reshape(-1, latent.shape[-1])
+
         # Vision
-        vision = self.vision_decoder(latent)
+        vision = self.vision_decoder(latent_flat)
+        vision = vision.view(*sequence_shape, *vision.shape[1:])
         # Proprioception
         proprioception = self.proprioception_decoder(latent)
         proprioception = self.proprioception_decoder_projection(proprioception)
@@ -98,7 +106,11 @@ class ObservationDecoder(nn.Module):
         internal_state = self.internal_state_decoder(latent)
         internal_state = self.internal_state_decoder_projection(internal_state)
         internal_state = symexp(internal_state)  # Apply symexp to map back to original scale
-        return vision, proprioception, internal_state
+        return {
+            "vision": vision,
+            "proprioception": proprioception,
+            "internal_state": internal_state,
+        }
 
     def _init_weights(self):
         for module in self.modules():
@@ -109,19 +121,19 @@ class ObservationDecoder(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, cfg: DreamerConfig, input_dim: int, output_dim: int, num_layers: int):
+    def __init__(self, config: DreamerConfig, input_dim: int, output_dim: int, num_layers: int):
         super().__init__()
         layers = []
         for i in range(num_layers):
             if i == 0:
                 dim_in = input_dim
-                dim_out = cfg.hidden_dim
+                dim_out = config.hidden_dim
             elif i == num_layers - 1:
-                dim_in = cfg.hidden_dim
+                dim_in = config.hidden_dim
                 dim_out = output_dim
             else:
-                dim_in = cfg.hidden_dim
-                dim_out = cfg.hidden_dim
+                dim_in = config.hidden_dim
+                dim_out = config.hidden_dim
             layers.append(nn.Linear(dim_in, dim_out))
             layers.append(nn.RMSNorm(dim_out))
             layers.append(nn.SiLU())
@@ -131,24 +143,124 @@ class MLP(nn.Module):
         return self.net(x)
 
 
+# From https://github.com/eclectic-sheep/sheeprl/blob/33b636681fd8b5340b284f2528db8821ab8dcd0b/sheeprl/models/models.py
+class LayerNormGRUCell(nn.Module):
+    """A GRU cell with a LayerNorm, taken
+    from https://github.com/danijar/dreamerv2/blob/main/dreamerv2/common/nets.py#L317.
+
+    This particular GRU cell accepts 3-D inputs, with a sequence of length 1, and applies
+    a LayerNorm after the projection of the inputs.
+
+    Args:
+        input_size (int): the input size.
+        hidden_size (int): the hidden state size
+        bias (bool, optional): whether to apply a bias to the input projection.
+            Defaults to True.
+        batch_first (bool, optional): whether the first dimension represent the batch dimension or not.
+            Defaults to False.
+        layer_norm_cls (Callable[..., nn.Module]): the layer norm to apply after the input projection.
+            Defaults to nn.Identiy.
+        layer_norm_kw (Dict[str, Any]): the kwargs of the layer norm.
+            Default to {}.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        bias: bool = True,
+        batch_first: bool = False,
+        layer_norm_cls: Callable[..., nn.Module] = nn.LayerNorm,
+        layer_norm_kw: Dict[str, Any] = {},
+    ) -> None:
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.bias = bias
+        self.batch_first = batch_first
+        self.linear = nn.Linear(input_size + hidden_size, 3 * hidden_size, bias=self.bias)
+        # Avoid multiple values for the `normalized_shape` argument
+        layer_norm_kw.pop("normalized_shape", None)
+        self.layer_norm = layer_norm_cls(3 * hidden_size, **layer_norm_kw)
+
+    def forward(self, input: Tensor, hx: Optional[Tensor] = None) -> Tensor:
+        is_3d = input.dim() == 3
+        if is_3d:
+            if input.shape[int(self.batch_first)] == 1:
+                input = input.squeeze(int(self.batch_first))
+            else:
+                raise AssertionError(
+                    "LayerNormGRUCell: Expected input to be 3-D with sequence length equal to 1 but received "
+                    f"a sequence of length {input.shape[int(self.batch_first)]}"
+                )
+        if hx.dim() == 3:
+            hx = hx.squeeze(0)
+        assert input.dim() in (
+            1,
+            2,
+        ), f"LayerNormGRUCell: Expected input to be 1-D or 2-D but received {input.dim()}-D tensor"
+
+        is_batched = input.dim() == 2
+        if not is_batched:
+            input = input.unsqueeze(0)
+
+        if hx is None:
+            hx = torch.zeros(input.size(0), self.hidden_size, dtype=input.dtype, device=input.device)
+        else:
+            hx = hx.unsqueeze(0) if not is_batched else hx
+
+        input = torch.cat((hx, input), -1)
+        x = self.linear(input)
+        x = self.layer_norm(x)
+        reset, cand, update = torch.chunk(x, 3, -1)
+        reset = torch.sigmoid(reset)
+        cand = torch.tanh(reset * cand)
+        update = torch.sigmoid(update - 1)
+        hx = update * cand + (1 - update) * hx
+
+        if not is_batched:
+            hx = hx.squeeze(0)
+        elif is_3d:
+            hx = hx.unsqueeze(0)
+
+        return hx
+
+
 class RSSM(nn.Module):
-    """Recurrent State-Space Model for learning world dynamics."""
+    """DreamerV3-style recurrent state-space model.
+
+    The latent feature exposed to the rest of this codebase is the concatenation
+    of a flattened categorical stochastic state and the deterministic recurrent
+    state, matching the feature used by DreamerV3 actor, critic, and heads.
+    """
 
     def __init__(self, config: DreamerConfig):
         super().__init__()
         self.config = config
+        self.recurrent_units = config.recurrent_units
+        self.stochastic_units = config.stochastic_units
+        self.discrete_classes = config.discrete_classes
+        self.stochastic_size = config.stochastic_units * config.discrete_classes
+        self.feature_dim = config.latent_dim
+        self.unimix = config.rssm_unimix
 
-        # GRU for recurrent state
-        input_size = config.action_space_dim + config.latent_dim + 1  # action + z + is_first
-        self.gru = nn.GRU(input_size, config.gru_units, num_layers=config.gru_layers, batch_first=True)
+        recurrent_input_dim = config.action_space_dim + self.stochastic_size
+        self.recurrent_input = nn.Sequential(
+            nn.Linear(recurrent_input_dim, config.hidden_dim),
+            nn.RMSNorm(config.hidden_dim),
+            nn.SiLU(),
+        )
+        self.gru = LayerNormGRUCell(config.hidden_dim, self.recurrent_units)
 
-        # Prior distribution (from recurrent state)
-        self.prior_mean = nn.Linear(config.gru_units, config.latent_dim)
-        self.prior_std = nn.Linear(config.gru_units, config.latent_dim)
-
-        # Posterior distribution (from recurrent state + embedding)
-        self.posterior_mean = nn.Linear(config.gru_units + config.encoder_dim, config.latent_dim)
-        self.posterior_std = nn.Linear(config.gru_units + config.encoder_dim, config.latent_dim)
+        # Both prior and posterior networks are MLPs with one hidden layer, outputting logits for the categorical distribution
+        self.prior_network = nn.Sequential(
+            MLP(config, input_dim=self.recurrent_units, output_dim=config.hidden_dim, num_layers=1),
+            nn.Linear(config.hidden_dim, self.stochastic_units * self.discrete_classes),
+        )
+        self.posterior_network = nn.Sequential(
+            MLP(config, input_dim=self.recurrent_units + config.encoder_dim, output_dim=config.hidden_dim, num_layers=1),
+            nn.Linear(config.hidden_dim, self.stochastic_units * self.discrete_classes),
+        )
 
         self._init_weights()
 
@@ -160,23 +272,65 @@ class RSSM(nn.Module):
             elif 'bias' in name:
                 nn.init.zeros_(param)
 
-    def _compute_dist(self, mean, std):
-        """Compute Normal distribution with learned parameters."""
-        std = F.softplus(std) + 0.1
-        return Normal(mean, std)
+    def _uniform_mix(self, logits: Tensor) -> Tensor:
+        logits = logits.view(*logits.shape[:-1], self.stochastic_units, self.discrete_classes)
+        if self.unimix > 0.0:
+            probs = logits.softmax(dim=-1)
+            uniform = torch.ones_like(probs) / self.discrete_classes
+            probs = (1.0 - self.unimix) * probs + self.unimix * uniform
+            logits = torch.log(probs.clamp_min(1e-8))
+        return logits
 
-    def prior(self, recurrent_state):
-        """Compute prior distribution p(z_t | h_t)."""
-        mean = self.prior_mean(recurrent_state)
-        std = self.prior_std(recurrent_state)
-        return self._compute_dist(mean, std)
+    def _dist(self, logits: Tensor) -> Independent:
+        return Independent(OneHotCategoricalStraightThrough(logits=logits), 1)
 
-    def posterior(self, recurrent_state, embed):
-        """Compute posterior distribution q(z_t | h_t, o_t)."""
+    def _sample_stochastic(self, logits: Tensor, deterministic: bool = False) -> Tensor:
+        if deterministic:
+            index = logits.argmax(dim=-1)
+            return F.one_hot(index, self.discrete_classes).to(dtype=logits.dtype)
+        return self._dist(logits).rsample()
+
+    def _feature(self, stochastic_state: Tensor, recurrent_state: Tensor) -> Tensor:
+        stochastic_flat = stochastic_state.reshape(*stochastic_state.shape[:-2], self.stochastic_size)
+        return torch.cat([stochastic_flat, recurrent_state], dim=-1)
+
+    def split_feature(self, latent: Tensor) -> Tuple[Tensor, Tensor]:
+        stochastic_flat, recurrent_state = torch.split(latent, [self.stochastic_size, self.recurrent_units], dim=-1)
+        stochastic_state = stochastic_flat.view(*stochastic_flat.shape[:-1], self.stochastic_units, self.discrete_classes)
+        return stochastic_state, recurrent_state
+
+    def prior_logits(self, recurrent_state: Tensor) -> Tensor:
+        logits = self.prior_network(recurrent_state)
+        return self._uniform_mix(logits)
+
+    def posterior_logits(self, recurrent_state: Tensor, embed: Tensor) -> Tensor:
         x = torch.cat([recurrent_state, embed], dim=-1)
-        mean = self.posterior_mean(x)
-        std = self.posterior_std(x)
-        return self._compute_dist(mean, std)
+        logits = self.posterior_network(x)
+        return self._uniform_mix(logits)
+
+    def prior(self, recurrent_state: Tensor) -> Independent:
+        """Return the categorical prior distribution p(z_t | h_t)."""
+        return self._dist(self.prior_logits(recurrent_state))
+
+    def posterior(self, recurrent_state: Tensor, embed: Tensor) -> Independent:
+        """Return the categorical posterior distribution q(z_t | h_t, o_t)."""
+        return self._dist(self.posterior_logits(recurrent_state, embed))
+
+    def recurrent_step(self, stochastic_state: Tensor, action: Tensor, recurrent_state: Tensor) -> Tensor:
+        # Gets h_t from z_{t-1} and a_{t-1}
+        # Included the GRU here
+        stochastic_flat = stochastic_state.reshape(stochastic_state.shape[0], self.stochastic_size)
+        action = action / torch.maximum(torch.ones_like(action), action.abs())
+        recurrent_input = torch.cat([stochastic_flat, action], dim=-1)
+        return self.gru(self.recurrent_input(recurrent_input), recurrent_state)
+
+    def imagine_step(self, latent: Tensor, recurrent_state: Tensor, action: Tensor, deterministic: bool = False) -> Tuple[Tensor, Tensor, Independent]:
+        stochastic_state, _ = self.split_feature(latent)
+        recurrent_state = self.recurrent_step(stochastic_state, action, recurrent_state)
+        logits = self.prior_logits(recurrent_state)
+        next_stochastic = self._sample_stochastic(logits, deterministic=deterministic)
+        next_latent = self._feature(next_stochastic, recurrent_state)
+        return next_latent, recurrent_state, self._dist(logits)
 
     def forward(self, action, embed, is_first, recurrent_state=None, deterministic=False):
         """
@@ -186,12 +340,12 @@ class RSSM(nn.Module):
             action: (batch, seq_len, action_dim) or (batch, action_dim)
             embed: (batch, seq_len, encoder_dim) or (batch, encoder_dim)
             is_first: (batch, seq_len) or (batch,)
-            recurrent_state: (batch, gru_units) or None
-            deterministic: if True, use prior mean (for imagination); else use posterior sample
+            recurrent_state: (batch, recurrent_units) or None
+            deterministic: if True, use categorical modes instead of samples
 
         Returns:
             latent: (batch, seq_len, latent_dim) or (batch, latent_dim)
-            recurrent_state: (batch, gru_units)
+            recurrent_state: (batch, recurrent_units)
             prior_dists: list of prior distributions
             posterior_dists: list of posterior distributions
         """
@@ -205,8 +359,17 @@ class RSSM(nn.Module):
 
         batch_size, seq_len, _ = action.shape
 
+        # Initialise for the start of an episode
         if recurrent_state is None:
-            recurrent_state = torch.zeros(batch_size, self.gru_units, device=action.device)
+            recurrent_state = torch.zeros(batch_size, self.recurrent_units, device=action.device)
+
+        previous_stochastic = torch.zeros(
+            batch_size,
+            self.stochastic_units,
+            self.discrete_classes,
+            device=action.device,
+            dtype=action.dtype,
+        )
 
         prior_dists = []
         posterior_dists = []
@@ -214,27 +377,23 @@ class RSSM(nn.Module):
 
         for t in range(seq_len):
             # Reset recurrent state on episode start
-            recurrent_state = recurrent_state * (1.0 - is_first[:, t:t+1])
+            reset_mask = 1.0 - is_first[:, t:t+1]
+            recurrent_state = recurrent_state * reset_mask
+            previous_stochastic = previous_stochastic * reset_mask[..., None]
+            step_action = action[:, t] * reset_mask
 
-            # Compute prior from current recurrent state
-            prior_dist = self.prior(recurrent_state)
+            # Compute h_t from z_{t-1} and a_{t-1}, then predict prior/posterior.
+            recurrent_state = self.recurrent_step(previous_stochastic, step_action, recurrent_state)
+            prior_logits = self.prior_logits(recurrent_state)
+            posterior_logits = self.posterior_logits(recurrent_state, embed[:, t])
+            prior_dist = self._dist(prior_logits)
+            posterior_dist = self._dist(posterior_logits)
             prior_dists.append(prior_dist)
-
-            # Compute posterior from recurrent state + observation
-            posterior_dist = self.posterior(recurrent_state, embed[:, t])
             posterior_dists.append(posterior_dist)
 
-            # Sample latent: use posterior during training, prior during imagination
-            if deterministic:
-                latent = prior_dist.mean
-            else:
-                latent = posterior_dist.rsample()
-            latents.append(latent)
-
-            # Update recurrent state via GRU for next timestep
-            gru_input = torch.cat([action[:, t], latent, is_first[:, t:t+1]], dim=-1)
-            _, recurrent_state_new = self.gru(gru_input.unsqueeze(1), recurrent_state.unsqueeze(0))
-            recurrent_state = recurrent_state_new.squeeze(0)
+            stochastic_state = self._sample_stochastic(posterior_logits, deterministic=deterministic)
+            previous_stochastic = stochastic_state
+            latents.append(self._feature(stochastic_state, recurrent_state))
 
         latent_stack = torch.stack(latents, dim=1)
         if squeeze_output:
@@ -252,18 +411,11 @@ class ActorNetwork(nn.Module):
         input_dim = config.latent_dim
         action_dim = config.action_space_dim
 
-        layers = []
-        prev_dim = input_dim
-        for hidden_dim in config.actor_hidden_dims:
-            layers.append(nn.Linear(prev_dim, hidden_dim))
-            layers.append(nn.Tanh())
-            prev_dim = hidden_dim
-
-        self.net = nn.Sequential(*layers)
+        self.net = MLP(config, input_dim=input_dim, output_dim=config.hidden_dim, num_layers=3)
 
         # Beta distribution parameters for continuous actions
-        self.alpha = nn.Linear(prev_dim, action_dim)
-        self.beta = nn.Linear(prev_dim, action_dim)
+        self.alpha = nn.Linear(config.hidden_dim, action_dim)
+        self.beta = nn.Linear(config.hidden_dim, action_dim)
 
         self._init_weights()
 
@@ -300,7 +452,7 @@ class ActorNetwork(nn.Module):
 
         dist = Beta(alpha, beta)
         if deterministic:
-            action = dist.mean
+            action = dist.mode  # TODO: Use mode for deterministic action, if it doesnt work, use mean instead
         else:
             action = dist.rsample()
 
@@ -321,15 +473,10 @@ class CriticNetwork(nn.Module):
         self.config = config
         input_dim = config.latent_dim
 
-        layers = []
-        prev_dim = input_dim
-        for hidden_dim in config.critic_hidden_dims:
-            layers.append(nn.Linear(prev_dim, hidden_dim))
-            layers.append(nn.ReLU())
-            prev_dim = hidden_dim
-
-        layers.append(nn.Linear(prev_dim, 1))
-        self.net = nn.Sequential(*layers)
+        self.net = nn.Sequential(
+            MLP(config, input_dim=input_dim, output_dim=config.hidden_dim, num_layers=3),
+            nn.Linear(config.hidden_dim, 1)
+        )
 
         self._init_weights()
 
@@ -368,19 +515,16 @@ class CriticNetwork(nn.Module):
 
 
 class RewardPredictor(nn.Module):
-    """Predict rewards from latent state."""
+    """Predict rewards from latent state.
+    Use TwoHotEncodingDistribution after this"""
 
     def __init__(self, config: DreamerConfig):
         super().__init__()
+        self.config = config
         input_dim = config.latent_dim
-        layers = [
-            nn.Linear(input_dim, 200),
-            nn.ReLU(),
-            nn.Linear(200, 100),
-            nn.ReLU(),
-            nn.Linear(100, 1),
-        ]
-        self.net = nn.Sequential(*layers)
+        output_dim = config.hidden_dim
+        self.net = MLP(config, input_dim=input_dim, output_dim=output_dim, num_layers=1)
+        self.reward_projection = nn.Linear(output_dim, 1)
         self._init_weights()
 
     def _init_weights(self):
@@ -392,23 +536,24 @@ class RewardPredictor(nn.Module):
 
     def forward(self, latent):
         """Predict reward from latent state."""
-        return self.net(latent)
+        latent = to_tensor(latent, self.config.device)
+        latent = self.net(latent)
+        return self.reward_projection(latent)
 
 
-class TerminalPredictor(nn.Module):
-    """Predict terminal state from latent state."""
+class ContinuePredictor(nn.Module):
+    """Predict terminal probability from latent state."""
 
     def __init__(self, config: DreamerConfig):
         super().__init__()
+        self.config = config
         input_dim = config.latent_dim
-        layers = [
-            nn.Linear(input_dim, 200),
-            nn.ReLU(),
-            nn.Linear(200, 100),
-            nn.ReLU(),
-            nn.Linear(100, 1),
-        ]
-        self.net = nn.Sequential(*layers)
+        output_dim = config.hidden_dim
+        self.net = MLP(config, input_dim=input_dim, output_dim=output_dim, num_layers=1)
+        self.terminal_projection = nn.Sequential(
+            nn.Linear(output_dim, 1),
+            nn.Sigmoid()
+        )
         self._init_weights()
 
     def _init_weights(self):
@@ -420,41 +565,82 @@ class TerminalPredictor(nn.Module):
 
     def forward(self, latent):
         """Predict terminal probability from latent state."""
-        return torch.sigmoid(self.net(latent))
+        latent = to_tensor(latent, self.config.device)
+        return self.terminal_projection(self.net(latent))
 
 
 class SequenceReplayBuffer:
-    """Replay buffer that stores sequences for RSSM training."""
+    """Replay buffer that stores same-environment sequences for RSSM training.
+
+    The training loop adds one transition per worker at each environment step. This
+    buffer groups those calls into one time-major row, so sampling can return
+    contiguous chunks from a single worker trajectory instead of accidentally
+    mixing workers within one RSSM sequence.
+    """
 
     def __init__(self, config: DreamerConfig, device='cpu'):
         self.config = config
         self.device = device
-        self.buffer_size = config.buffer_size
-        self.seq_length = config.replay_buffer_seq_length
-        self.batch_size = config.replay_buffer_batch_size
+        self.num_workers = config.num_workers
+        if self.num_workers <= 0:
+            raise ValueError(f"num_workers must be positive, got {self.num_workers}")
+        # Maximum time steps per worker to store, ensuring total capacity is as specified in config
+        self.replay_capacity = max(1, config.replay_capacity // self.num_workers)
+        self.batch_length = config.batch_length
+        self.batch_size = config.batch_size
+        self._rng = np.random.default_rng()
 
-        self.observations = deque(maxlen=config.buffer_size)
-        self.actions = deque(maxlen=config.buffer_size)
-        self.rewards = deque(maxlen=config.buffer_size)
-        self.dones = deque(maxlen=config.buffer_size)
-        self.episode_starts = deque(maxlen=config.buffer_size)
+        # Each item in the list is a time step of all environments, so the shape of each item is [num_workers, ...]. 
+        # The deques ensure we only keep the most recent replay_capacity time steps per worker.
+        self.observations = deque(maxlen=self.replay_capacity)
+        self.actions = deque(maxlen=self.replay_capacity)
+        self.rewards = deque(maxlen=self.replay_capacity)
+        self.dones = deque(maxlen=self.replay_capacity)
+        self.episode_starts = deque(maxlen=self.replay_capacity)
+
+        self._pending_observations = []
+        self._pending_actions = []
+        self._pending_rewards = []
+        self._pending_dones = []
+        self._pending_episode_starts = []
 
     def add(self, obs_dict, action, reward, done, is_first=False):
-        """Add transition to buffer."""
-        self.observations.append(obs_dict)
-        self.actions.append(action)
-        self.rewards.append(reward)
-        self.dones.append(done)
-        self.episode_starts.append(is_first)
+        """Add one worker transition.
+
+        Calls are expected in worker order. Once all workers for a timestep have
+        been added, the row is committed as [env0, env1, ...].
+        """
+        if len(self._pending_observations) >= self.num_workers:
+            raise RuntimeError("Pending replay row already has num_workers entries; this indicates an add() ordering bug.")
+
+        self._pending_observations.append(obs_dict)
+        self._pending_actions.append(action)
+        self._pending_rewards.append(reward)
+        self._pending_dones.append(done)
+        self._pending_episode_starts.append(is_first)
+
+        if len(self._pending_observations) == self.num_workers:
+            self.observations.append(self._pending_observations)
+            self.actions.append(self._pending_actions)
+            self.rewards.append(self._pending_rewards)
+            self.dones.append(self._pending_dones)
+            self.episode_starts.append(self._pending_episode_starts)
+
+            self._pending_observations = []
+            self._pending_actions = []
+            self._pending_rewards = []
+            self._pending_dones = []
+            self._pending_episode_starts = []
 
     def sample(self):
-        """Sample sequences from buffer."""
-        buffer_len = len(self.observations)
-        if buffer_len < self.config.min_buffer_size_before_training:
+        """Sample same-worker contiguous sequences from the buffer."""
+        time_len = len(self.observations)
+        if len(self) < self.config.min_buffer_size_before_training or time_len < self.batch_length:
             return None
 
-        # Sample random starting indices
-        indices = np.random.randint(0, buffer_len - self.seq_length, size=self.batch_size)
+        max_start = time_len - self.batch_length + 1
+        start_indices = self._rng.integers(0, max_start, size=self.batch_size)
+        env_indices = self._rng.integers(0, self.num_workers, size=self.batch_size)
 
         obs_sequences = []
         action_sequences = []
@@ -462,12 +648,13 @@ class SequenceReplayBuffer:
         done_sequences = []
         is_first_sequences = []
 
-        for idx in indices:
-            obs_seq = [self.observations[idx + i] for i in range(self.seq_length)]
-            action_seq = [self.actions[idx + i] for i in range(self.seq_length)]
-            reward_seq = [self.rewards[idx + i] for i in range(self.seq_length)]
-            done_seq = [self.dones[idx + i] for i in range(self.seq_length)]
-            is_first_seq = [self.episode_starts[idx + i] for i in range(self.seq_length)]
+        for start_idx, env_idx in zip(start_indices, env_indices):
+            obs_seq = [self.observations[start_idx + i][env_idx] for i in range(self.batch_length)]
+            action_seq = [self.actions[start_idx + i][env_idx] for i in range(self.batch_length)]
+            reward_seq = [self.rewards[start_idx + i][env_idx] for i in range(self.batch_length)]
+            done_seq = [self.dones[start_idx + i][env_idx] for i in range(self.batch_length)]
+            is_first_seq = [self.episode_starts[start_idx + i][env_idx] for i in range(self.batch_length)]
+            is_first_seq[0] = True
 
             obs_sequences.append(obs_seq)
             action_sequences.append(action_seq)
@@ -484,7 +671,7 @@ class SequenceReplayBuffer:
         }
 
     def __len__(self):
-        return len(self.observations)
+        return len(self.observations) * self.num_workers + len(self._pending_observations)
 
 
 # From https://github.com/Eclectic-Sheep/sheeprl/blob/main/sheeprl/utils/utils.py
@@ -495,3 +682,59 @@ def symlog(x: Tensor) -> Tensor:
 
 def symexp(x: Tensor) -> Tensor:
     return torch.sign(x) * (torch.exp(torch.abs(x)) - 1)
+
+
+# From https://github.com/Eclectic-Sheep/sheeprl/blob/main/sheeprl/utils/distribution.py
+class TwoHotEncodingDistribution:
+    def __init__(
+        self,
+        logits: Tensor,
+        dims: int = 0,
+        low: int = -20,
+        high: int = 20,
+        transfwd: Callable[[Tensor], Tensor] = symlog,
+        transbwd: Callable[[Tensor], Tensor] = symexp,
+    ):
+        self.logits = logits
+        self.probs = F.softmax(logits, dim=-1)
+        self.dims = tuple([-x for x in range(1, dims + 1)])
+        self.bins = torch.linspace(low, high, logits.shape[-1], device=logits.device)
+        self.low = low
+        self.high = high
+        self.transfwd = transfwd
+        self.transbwd = transbwd
+        self._batch_shape = logits.shape[: len(logits.shape) - dims]
+        self._event_shape = logits.shape[len(logits.shape) - dims : -1] + (1,)
+
+    @property
+    def mean(self) -> Tensor:
+        return self.transbwd((self.probs * self.bins).sum(dim=self.dims, keepdim=True))
+
+    @property
+    def mode(self) -> Tensor:
+        return self.transbwd((self.probs * self.bins).sum(dim=self.dims, keepdim=True))
+
+    def log_prob(self, x: Tensor) -> Tensor:
+        x = self.transfwd(x)
+        # below in [-1, len(self.bins) - 1]
+        below = (self.bins <= x).type(torch.int32).sum(dim=-1, keepdim=True) - 1
+        # above in [0, len(self.bins)]
+        above = below + 1
+
+        # above in [0, len(self.bins) - 1]
+        above = torch.minimum(above, torch.full_like(above, len(self.bins) - 1))
+        # below in [0, len(self.bins) - 1]
+        below = torch.maximum(below, torch.zeros_like(below))
+
+        equal = below == above
+        dist_to_below = torch.where(equal, 1, torch.abs(self.bins[below] - x))
+        dist_to_above = torch.where(equal, 1, torch.abs(self.bins[above] - x))
+        total = dist_to_below + dist_to_above
+        weight_below = dist_to_above / total
+        weight_above = dist_to_below / total
+        target = (
+            F.one_hot(below, len(self.bins)) * weight_below[..., None]
+            + F.one_hot(above, len(self.bins)) * weight_above[..., None]
+        ).squeeze(-2)
+        log_pred = self.logits - torch.logsumexp(self.logits, dim=-1, keepdims=True)
+        return (target * log_pred).sum(dim=self.dims)
