@@ -78,6 +78,9 @@ class VisionDecoder(nn.Module):
             nn.ConvTranspose2d(depth * 2, output_channels, kernel_size=4, stride=2, padding=1, bias=False),
             LayerNormChannelLast(output_channels),
             nn.SiLU(),
+            
+            # Add in a sigmoid activation to ensure output is in [0, 1] range for image reconstruction
+            nn.Sigmoid(),
         )
 
     def forward(self, x):
