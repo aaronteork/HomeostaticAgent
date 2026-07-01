@@ -225,13 +225,17 @@ def compute_world_model_loss(
     kl_loss = config.dyn_loss_weight * dyn_loss + config.rep_loss_weight * rep_loss
 
     # ===== Reward Prediction Loss =====
-    reward_dist = reward_predictor(latent)  # two-hot distribution over rewards
-    reward_target = reward.view(batch_size, seq_len, 1)
+    # Replay stores (obs_t, action_t, reward_{t+1}, done_{t+1}). The RSSM
+    # posterior latent at index t is built from obs_t and action_{t-1}, so
+    # rewards/dones from action_t align with the next posterior latent.
+    reward_latent = latent[:, 1:]
+    reward_target = reward[:, :-1].contiguous().view(batch_size, seq_len - 1, 1)
+    reward_dist = reward_predictor(reward_latent)  # two-hot distribution over rewards
     reward_loss = -reward_dist.log_prob(reward_target).mean()
 
     # ===== Terminal/Done Prediction Loss =====
-    predicted_terminal = terminal_predictor(latent)  # (batch, seq_len, 1)
-    done_target = done.view(batch_size, seq_len, 1).float()
+    predicted_terminal = terminal_predictor(reward_latent)  # (batch, seq_len - 1, 1)
+    done_target = done[:, :-1].contiguous().view(batch_size, seq_len - 1, 1).float()
     terminal_loss = F.binary_cross_entropy(predicted_terminal, done_target)
 
     # ===== Combined Loss with Weighting =====

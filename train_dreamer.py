@@ -5,8 +5,6 @@ import numpy as np
 import mlflow
 import torch
 from torch.optim import Adam
-from torch.optim.lr_scheduler import LinearLR
-from tqdm.auto import tqdm
 
 from configs.config_dreamer import DreamerConfig
 from utils.utils_env import create_env
@@ -35,7 +33,7 @@ def train_dreamer():
     logger.info("Starting Dreamer V3 training...")
 
     # Create mlflow
-    mlflow.set_tracking_uri("sqlite:///runs.db")
+    mlflow.set_tracking_uri("sqlite:///dreamer_runs.db")
     mlflow.set_experiment("HomoeostaticAgent")
 
     # Get config
@@ -394,42 +392,42 @@ def train_dreamer():
                         actor_loss_value = None
                         critic_loss_value = None
 
-            # Log metrics
-            metrics_to_log = {
-                'global_step': global_step,
-                'train/average_episode_length': avg_episode_length,
-                'train/episodes_finished': episodes_finished,
-                'train/buffer_size': len(replay_buffer),
-                'train/world_model_learning_rate': world_model_optimizer.param_groups[0]['lr'],
-                'train/actor_learning_rate': actor_optimizer.param_groups[0]['lr'],
-                'train/critic_learning_rate': critic_optimizer.param_groups[0]['lr'],
-            }
+            # # Log metrics
+            # metrics_to_log = {
+            #     'global_step': global_step,
+            #     'train/average_episode_length': avg_episode_length,
+            #     'train/episodes_finished': episodes_finished,
+            #     'train/buffer_size': len(replay_buffer),
+            #     'train/world_model_learning_rate': world_model_optimizer.param_groups[0]['lr'],
+            #     'train/actor_learning_rate': actor_optimizer.param_groups[0]['lr'],
+            #     'train/critic_learning_rate': critic_optimizer.param_groups[0]['lr'],
+            # }
 
-            if len(replay_buffer) >= cfg.min_buffer_size_before_training:
-                metrics_to_log.update({
-                    'world_model/reconstruction_loss': avg_reconstruction_loss,
-                    'world_model/kl_loss': avg_kl_loss,
-                    'world_model/total_loss': avg_wm_loss,
-                    'train/kl_divergence': avg_kl_loss,
-                })
-                if ac_metrics:
-                    metrics_to_log.update(ac_metrics)
-                    metrics_to_log.update({
-                        'train/policy_loss': ac_metrics['actor_critic/actor_loss'],
-                        'train/value_loss': ac_metrics['actor_critic/critic_loss'],
-                        'train/entropy': ac_metrics['actor_critic/entropy'],
-                        'train/learning_rate': actor_optimizer.param_groups[0]['lr'],
-                        'train/explained_variance': ac_metrics['actor_critic/explained_variance'],
-                    })
+            # if len(replay_buffer) >= cfg.min_buffer_size_before_training:
+            #     metrics_to_log.update({
+            #         'world_model/reconstruction_loss': avg_reconstruction_loss,
+            #         'world_model/kl_loss': avg_kl_loss,
+            #         'world_model/total_loss': avg_wm_loss,
+            #         'train/kl_divergence': avg_kl_loss,
+            #     })
+            #     if ac_metrics:
+            #         metrics_to_log.update(ac_metrics)
+            #         metrics_to_log.update({
+            #             'train/policy_loss': ac_metrics['actor_critic/actor_loss'],
+            #             'train/value_loss': ac_metrics['actor_critic/critic_loss'],
+            #             'train/entropy': ac_metrics['actor_critic/entropy'],
+            #             'train/learning_rate': actor_optimizer.param_groups[0]['lr'],
+            #             'train/explained_variance': ac_metrics['actor_critic/explained_variance'],
+            #         })
 
-            mlflow.log_metrics(metrics_to_log, step=iteration)
+            # mlflow.log_metrics(metrics_to_log, step=iteration)
 
-            if iteration % 10 == 0:
-                logger.info(f"Iteration {iteration}: Steps={global_step}/{cfg.total_env_steps}, Buffer size={len(replay_buffer)}, Episodes finished={episodes_finished}")
-                if len(replay_buffer) >= cfg.min_buffer_size_before_training:
-                    logger.info(f"  WM Loss: {avg_wm_loss:.4f} (Recon: {avg_reconstruction_loss:.4f}, KL: {avg_kl_loss:.4f})")
-                    if actor_loss_value is not None:
-                        logger.info(f"  Actor Loss: {actor_loss_value:.4f}, Critic Loss: {critic_loss_value:.4f}")
+            # if iteration % 10 == 0:
+            #     logger.info(f"Iteration {iteration}: Steps={global_step}/{cfg.total_env_steps}, Buffer size={len(replay_buffer)}, Episodes finished={episodes_finished}")
+            #     if len(replay_buffer) >= cfg.min_buffer_size_before_training:
+            #         logger.info(f"  WM Loss: {avg_wm_loss:.4f} (Recon: {avg_reconstruction_loss:.4f}, KL: {avg_kl_loss:.4f})")
+            #         if actor_loss_value is not None:
+            #             logger.info(f"  Actor Loss: {actor_loss_value:.4f}, Critic Loss: {critic_loss_value:.4f}")
             iteration += 1
 
     # Save models
