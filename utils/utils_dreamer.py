@@ -94,8 +94,17 @@ def prepare_sequence_batch(batch_data, cfg):
     dones = to_tensor(np.asarray(batch_data["dones"]).squeeze(-1), cfg.device)
     is_first = to_tensor(np.asarray(batch_data["is_first"]), cfg.device)
 
-    prev_actions = torch.zeros_like(actions)
-    prev_actions[:, 1:] = actions[:, :-1]
+    if "prev_actions" in batch_data:
+        prev_actions = torch.stack(
+            [
+                to_tensor(action, cfg.device).squeeze(0)
+                for seq in batch_data["prev_actions"]
+                for action in seq
+            ]
+        ).view(batch_size, seq_len, -1)
+    else:
+        prev_actions = torch.zeros_like(actions)
+        prev_actions[:, 1:] = actions[:, :-1]
 
     reset_mask = 1.0 - is_first
     prev_actions = prev_actions * reset_mask.unsqueeze(-1)
@@ -284,10 +293,10 @@ def imagination_rollout(
     """
     Rollout imagination trajectories for actor-critic training.
 
-    The rollout starts from detached posterior states sampled from replay. The
-    policy sees stop-gradient imagined states, matching DreamerV3's default
-    ac_grads=False behavior, while sampled actions are still used to advance the
-    frozen world model.
+    The rollout starts from detached posterior states sampled from replay. It
+    keeps gradients for the actor log probabilities and entropy terms while
+    treating the world model predictions as fixed targets for the REINFORCE
+    actor objective used by DreamerV3.
 
     Args:
         rssm: RSSM model
@@ -434,7 +443,7 @@ def compute_actor_critic_loss(
     Args:
         critic: Critic network
         ema_critic: Exponential moving average of the critic for value regularization
-        imagined_trajectories: dict with DETACHED imagined data (from imagination_rollout)
+        imagined_trajectories: dict with imagined data from imagination_rollout
         config: DreamerConfig
 
     Returns:
@@ -1223,7 +1232,7 @@ class ActorNetwork(nn.Module):
 
         dist = Beta(alpha, beta)
         if deterministic:
-            action = dist.mode  # TODO: Use mode for deterministic action, if it doesnt work, use mean instead
+            action = dist.mode  # Beta mode in [0, 1] because alpha,beta > 1
         else:
             action = dist.rsample()
 
@@ -1492,6 +1501,7 @@ class SequenceReplayBuffer:
         """Build same-worker contiguous sequences and keep replay coordinates."""
         obs_sequences = []
         action_sequences = []
+        prev_action_sequences = []
         reward_sequences = []
         done_sequences = []
         is_first_sequences = []
@@ -1507,6 +1517,17 @@ class SequenceReplayBuffer:
             action_seq = [
                 self.actions[start_idx + i][env_idx] for i in range(self.batch_length)
             ]
+            prev_action_seq = []
+            for i in range(self.batch_length):
+                item_idx = start_idx + i
+                if i == 0:
+                    if start_idx > 0 and not self.episode_starts[start_idx][env_idx]:
+                        prev_action = self.actions[start_idx - 1][env_idx]
+                    else:
+                        prev_action = np.zeros_like(self.actions[start_idx][env_idx])
+                else:
+                    prev_action = self.actions[item_idx - 1][env_idx]
+                prev_action_seq.append(prev_action)
             reward_seq = [
                 self.rewards[start_idx + i][env_idx] for i in range(self.batch_length)
             ]
@@ -1530,6 +1551,7 @@ class SequenceReplayBuffer:
 
             obs_sequences.append(obs_seq)
             action_sequences.append(action_seq)
+            prev_action_sequences.append(prev_action_seq)
             reward_sequences.append(reward_seq)
             done_sequences.append(done_seq)
             is_first_sequences.append(is_first_seq)
@@ -1540,6 +1562,7 @@ class SequenceReplayBuffer:
         return {
             "obs": obs_sequences,
             "actions": action_sequences,
+            "prev_actions": prev_action_sequences,
             "rewards": reward_sequences,
             "dones": done_sequences,
             "is_first": is_first_sequences,
