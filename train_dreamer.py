@@ -98,7 +98,7 @@ def train_dreamer():
     previous_stochastic = None
     iteration = 0
     batch_steps = cfg.batch_size * cfg.batch_length
-    should_train = Ratio(cfg.replay_ratio / (batch_steps * frame_skip))  # 0.5
+    should_train = Ratio(cfg.replay_ratio / (batch_steps * frame_skip))
 
     with mlflow.start_run(run_name="Dreamer V3 Training - " + dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")):
         mlflow.log_params(asdict(cfg))
@@ -169,6 +169,7 @@ def train_dreamer():
             action_std = float(np.std(action))
 
             # Store in replay buffer (one transition per worker)
+            episode_global_step = global_step + cfg.num_workers
             for i in range(cfg.num_workers):
                 if "_episode" in infos and infos["_episode"][i]:
                     episodes_finished += 1
@@ -247,6 +248,7 @@ def train_dreamer():
                         seq_len,
                         obs_batch_flat,
                         obs_target,
+                        actions_batch,
                         prev_actions,
                         rewards_batch,
                         dones_batch,
@@ -262,7 +264,7 @@ def train_dreamer():
                         world_model.decoder,
                         world_model.reward_predictor,
                         world_model.terminal_predictor,
-                        prev_actions, embed_batch, obs_target, is_first_batch,
+                        prev_actions, actions_batch, embed_batch, obs_target, is_first_batch,
                         rewards_batch, dones_batch, cfg,
                         initial_stochastic=initial_stochastic,
                         initial_recurrent=initial_recurrent,
@@ -307,6 +309,7 @@ def train_dreamer():
                             seq_len,
                             obs_batch_flat,
                             obs_target,
+                            actions_batch,
                             prev_actions,
                             rewards_batch,
                             dones_batch,
@@ -318,6 +321,7 @@ def train_dreamer():
                         if batch_size > cfg.imagine_batch_size:
                             take = slice(0, cfg.imagine_batch_size)
                             batch_size = cfg.imagine_batch_size
+                            actions_batch = actions_batch[take]
                             prev_actions = prev_actions[take]
                             rewards_batch = rewards_batch[take]
                             dones_batch = dones_batch[take]
@@ -404,42 +408,19 @@ def train_dreamer():
                         actor_loss_value = None
                         critic_loss_value = None
 
-            # Log metrics
+            # Log only the same high-level training metrics as train_ppo.py so
+            # Dreamer and PPO runs are directly comparable in MLflow.
             metrics_to_log = {
                 'global_step': global_step,
+                'train/policy_loss': actor_loss_value if actor_loss_value is not None else 0,
+                'train/value_loss': critic_loss_value if critic_loss_value is not None else 0,
+                'train/entropy': ac_metrics.get('actor_critic/entropy', 0),
+                'train/learning_rate': actor_optimizer.param_groups[0]['lr'],
+                'train/kl_divergence': avg_kl_loss,
                 'train/average_episode_length': avg_episode_length,
                 'train/episodes_finished': episodes_finished,
-                'train/buffer_size': len(replay_buffer),
-                'train/train_batches_due': train_batches_due,
-                'train/world_model_updates': num_wm_updates,
-                'train/actor_critic_updates': num_ac_updates,
-                'train/world_model_learning_rate': world_model_optimizer.param_groups[0]['lr'],
-                'train/actor_learning_rate': actor_optimizer.param_groups[0]['lr'],
-                'train/critic_learning_rate': critic_optimizer.param_groups[0]['lr'],
-                'env/reward_mean': float(np.mean(rewards)),
-                'env/reward_std': float(np.std(rewards)),
-                'env/done_fraction': float(np.mean(done)),
-                'policy/action_std': action_std,
-                'policy/action_distance_from_center': mean_action_distance_from_center,
-                'policy/random_action_fraction': random_action_fraction,
+                'train/explained_variance': ac_metrics.get('actor_critic/explained_variance', 0),
             }
-
-            if len(replay_buffer) >= cfg.min_buffer_size_before_training:
-                metrics_to_log.update({
-                    'world_model/reconstruction_loss': avg_reconstruction_loss,
-                    'world_model/kl_loss': avg_kl_loss,
-                    'world_model/total_loss': avg_wm_loss,
-                    'train/kl_divergence': avg_kl_loss,
-                })
-                if ac_metrics:
-                    metrics_to_log.update(ac_metrics)
-                    metrics_to_log.update({
-                        'train/policy_loss': ac_metrics['actor_critic/actor_loss'],
-                        'train/value_loss': ac_metrics['actor_critic/critic_loss'],
-                        'train/entropy': ac_metrics['actor_critic/entropy'],
-                        'train/learning_rate': actor_optimizer.param_groups[0]['lr'],
-                        'train/explained_variance': ac_metrics['actor_critic/explained_variance'],
-                    })
 
             mlflow.log_metrics(metrics_to_log, step=iteration)
 

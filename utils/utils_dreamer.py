@@ -130,6 +130,7 @@ def prepare_sequence_batch(batch_data, cfg):
         seq_len,
         obs_batch_flat,
         obs_target,
+        actions,
         prev_actions,
         rewards,
         dones,
@@ -147,6 +148,7 @@ def compute_world_model_loss(
     decoder,
     reward_predictor,
     terminal_predictor,
+    prev_action,
     action,
     embed,
     obs,
@@ -166,6 +168,7 @@ def compute_world_model_loss(
         decoder: CNN decoder
         reward_predictor: Reward prediction network
         terminal_predictor: Terminal prediction network
+        prev_action: (batch, seq_len, action_dim)
         action: (batch, seq_len, action_dim)
         embed: (batch, seq_len, encoder_dim)
         obs: dict of observation targets
@@ -178,12 +181,12 @@ def compute_world_model_loss(
         loss: scalar loss
         metrics: dict with loss components
     """
-    batch_size, seq_len = action.shape[0], action.shape[1]
+    batch_size, seq_len = prev_action.shape[0], prev_action.shape[1]
 
     # Forward through RSSM
     # Compute RSSM outputs here to get the grad
     latent, recurrent_state, prior_dists, posterior_dists = rssm(
-        action,
+        prev_action,
         embed,
         is_first,
         recurrent_state=initial_recurrent,
@@ -214,9 +217,9 @@ def compute_world_model_loss(
         )
 
     # ===== DreamerV3 KL balancing with free nats =====
-    free_nats = torch.tensor(config.free_nats, device=action.device)
-    dyn_loss = torch.tensor(0.0, device=action.device)
-    rep_loss = torch.tensor(0.0, device=action.device)
+    free_nats = torch.tensor(config.free_nats, device=prev_action.device)
+    dyn_loss = torch.tensor(0.0, device=prev_action.device)
+    rep_loss = torch.tensor(0.0, device=prev_action.device)
 
     for prior_dist, posterior_dist in zip(prior_dists, posterior_dists):
         prior_logits = prior_dist.base_dist.logits
@@ -234,17 +237,28 @@ def compute_world_model_loss(
     kl_loss = config.dyn_loss_weight * dyn_loss + config.rep_loss_weight * rep_loss
 
     # ===== Reward Prediction Loss =====
-    # Replay stores (obs_t, action_t, reward_{t+1}, done_{t+1}). The RSSM
-    # posterior latent at index t is built from obs_t and action_{t-1}, so
-    # rewards/dones from action_t align with the next posterior latent.
-    reward_latent = latent[:, 1:]
-    reward_target = reward[:, :-1].contiguous().view(batch_size, seq_len - 1, 1)
+    # Replay stores (obs_t, action_t, reward_{t+1}, done_{t+1}), while the
+    # posterior latent at index t is built from obs_t and action_{t-1}. Predict
+    # each transition target from the one-step prior produced by latent_t and
+    # action_t. This keeps terminal transitions learnable even when the vector
+    # env autoresets on the next row and reset-crossing chunks are rejected.
+    latent_flat = latent.reshape(batch_size * seq_len, -1)
+    _, recurrent_flat = rssm.split_feature(latent_flat)
+    action_flat = action.reshape(batch_size * seq_len, -1)
+    reward_latent, _, _ = rssm.imagine_step(
+        latent_flat,
+        recurrent_flat,
+        action_flat,
+        deterministic=False,
+    )
+    reward_latent = reward_latent.view(batch_size, seq_len, -1)
+    reward_target = reward.contiguous().view(batch_size, seq_len, 1)
     reward_dist = reward_predictor(reward_latent)  # two-hot distribution over rewards
     reward_loss = -reward_dist.log_prob(reward_target).mean()
 
     # ===== Terminal/Done Prediction Loss =====
-    predicted_terminal = terminal_predictor(reward_latent)  # (batch, seq_len - 1, 1)
-    done_target = done[:, :-1].contiguous().view(batch_size, seq_len - 1, 1).float()
+    predicted_terminal = terminal_predictor(reward_latent)  # (batch, seq_len, 1)
+    done_target = done.contiguous().view(batch_size, seq_len, 1).float()
     terminal_loss = F.binary_cross_entropy(predicted_terminal, done_target)
 
     # ===== Combined Loss with Weighting =====
@@ -293,10 +307,10 @@ def imagination_rollout(
     """
     Rollout imagination trajectories for actor-critic training.
 
-    The rollout starts from detached posterior states sampled from replay. It
-    keeps gradients for the actor log probabilities and entropy terms while
-    treating the world model predictions as fixed targets for the REINFORCE
-    actor objective used by DreamerV3.
+    The rollout starts from detached posterior states sampled from replay. For
+    DreamerV3, actor learning uses a REINFORCE-style surrogate with stopped
+    imagined returns, so gradients should flow through the actor log-probs and
+    entropy terms, not through predicted dynamics, rewards, or terminals.
 
     Args:
         rssm: RSSM model
@@ -471,7 +485,6 @@ def compute_actor_critic_loss(
             gamma=config.gamma,
             lam=config.gae_lambda,
         )
-
         if return_normalizer is None:
             return_offset = critic_returns.detach().quantile(
                 config.return_norm_percentile_low / 100.0
