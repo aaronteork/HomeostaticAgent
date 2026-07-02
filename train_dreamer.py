@@ -110,6 +110,7 @@ def train_dreamer():
             world_model.eval()
 
             list_iterations_episode_length = []
+            random_action_fraction = 0.0
             replay_is_first = is_first.detach().cpu().numpy().astype(bool)
             with torch.no_grad():
                 if recurrent_state is None or previous_stochastic is None:
@@ -143,9 +144,18 @@ def train_dreamer():
                 action, log_prob, dist = actor(latent, deterministic=False)
                 action = action.detach().cpu().numpy()
 
-                # # Clamp action to valid range [0, 1]
-                # # Not required since we are using Beta Distribution
-                # action = np.clip(action, 0.0, 1.0)
+                if global_step < cfg.seed_steps:
+                    action = env.action_space.sample()
+                    random_action_fraction = 1.0
+                elif cfg.exploration_epsilon > 0.0:
+                    random_mask = (
+                        np.random.random(cfg.num_workers)
+                        < cfg.exploration_epsilon
+                    )
+                    if np.any(random_mask):
+                        random_actions = env.action_space.sample()
+                        action[random_mask] = random_actions[random_mask]
+                        random_action_fraction = float(np.mean(random_mask))
 
                 # Check for NaN
                 if np.any(np.isnan(action)) or np.any(np.isinf(action)):
@@ -155,6 +165,8 @@ def train_dreamer():
             # Step environment
             next_obs, rewards, terminations, truncations, infos = env.step(action)
             done = terminations | truncations
+            mean_action_distance_from_center = float(np.mean(np.abs(action - 0.5)))
+            action_std = float(np.std(action))
 
             # Store in replay buffer (one transition per worker)
             for i in range(cfg.num_workers):
@@ -274,7 +286,7 @@ def train_dreamer():
                 avg_kl_loss = total_kl_loss / max(num_wm_updates, 1)
 
                 # ===== PHASE 3: Imagination Rollout & Actor-Critic Training =====
-                if num_wm_updates > 0:
+                if num_wm_updates > 0 and global_step >= cfg.seed_steps:
                     logger.debug(f"Iteration {iteration}: Starting imagination rollout")
                     actor.train()
                     critic.train()
@@ -392,42 +404,52 @@ def train_dreamer():
                         actor_loss_value = None
                         critic_loss_value = None
 
-            # # Log metrics
-            # metrics_to_log = {
-            #     'global_step': global_step,
-            #     'train/average_episode_length': avg_episode_length,
-            #     'train/episodes_finished': episodes_finished,
-            #     'train/buffer_size': len(replay_buffer),
-            #     'train/world_model_learning_rate': world_model_optimizer.param_groups[0]['lr'],
-            #     'train/actor_learning_rate': actor_optimizer.param_groups[0]['lr'],
-            #     'train/critic_learning_rate': critic_optimizer.param_groups[0]['lr'],
-            # }
+            # Log metrics
+            metrics_to_log = {
+                'global_step': global_step,
+                'train/average_episode_length': avg_episode_length,
+                'train/episodes_finished': episodes_finished,
+                'train/buffer_size': len(replay_buffer),
+                'train/train_batches_due': train_batches_due,
+                'train/world_model_updates': num_wm_updates,
+                'train/actor_critic_updates': num_ac_updates,
+                'train/world_model_learning_rate': world_model_optimizer.param_groups[0]['lr'],
+                'train/actor_learning_rate': actor_optimizer.param_groups[0]['lr'],
+                'train/critic_learning_rate': critic_optimizer.param_groups[0]['lr'],
+                'env/reward_mean': float(np.mean(rewards)),
+                'env/reward_std': float(np.std(rewards)),
+                'env/done_fraction': float(np.mean(done)),
+                'policy/action_std': action_std,
+                'policy/action_distance_from_center': mean_action_distance_from_center,
+                'policy/random_action_fraction': random_action_fraction,
+            }
 
-            # if len(replay_buffer) >= cfg.min_buffer_size_before_training:
-            #     metrics_to_log.update({
-            #         'world_model/reconstruction_loss': avg_reconstruction_loss,
-            #         'world_model/kl_loss': avg_kl_loss,
-            #         'world_model/total_loss': avg_wm_loss,
-            #         'train/kl_divergence': avg_kl_loss,
-            #     })
-            #     if ac_metrics:
-            #         metrics_to_log.update(ac_metrics)
-            #         metrics_to_log.update({
-            #             'train/policy_loss': ac_metrics['actor_critic/actor_loss'],
-            #             'train/value_loss': ac_metrics['actor_critic/critic_loss'],
-            #             'train/entropy': ac_metrics['actor_critic/entropy'],
-            #             'train/learning_rate': actor_optimizer.param_groups[0]['lr'],
-            #             'train/explained_variance': ac_metrics['actor_critic/explained_variance'],
-            #         })
+            if len(replay_buffer) >= cfg.min_buffer_size_before_training:
+                metrics_to_log.update({
+                    'world_model/reconstruction_loss': avg_reconstruction_loss,
+                    'world_model/kl_loss': avg_kl_loss,
+                    'world_model/total_loss': avg_wm_loss,
+                    'train/kl_divergence': avg_kl_loss,
+                })
+                if ac_metrics:
+                    metrics_to_log.update(ac_metrics)
+                    metrics_to_log.update({
+                        'train/policy_loss': ac_metrics['actor_critic/actor_loss'],
+                        'train/value_loss': ac_metrics['actor_critic/critic_loss'],
+                        'train/entropy': ac_metrics['actor_critic/entropy'],
+                        'train/learning_rate': actor_optimizer.param_groups[0]['lr'],
+                        'train/explained_variance': ac_metrics['actor_critic/explained_variance'],
+                    })
 
-            # mlflow.log_metrics(metrics_to_log, step=iteration)
+            mlflow.log_metrics(metrics_to_log, step=iteration)
 
-            # if iteration % 10 == 0:
-            #     logger.info(f"Iteration {iteration}: Steps={global_step}/{cfg.total_env_steps}, Buffer size={len(replay_buffer)}, Episodes finished={episodes_finished}")
-            #     if len(replay_buffer) >= cfg.min_buffer_size_before_training:
-            #         logger.info(f"  WM Loss: {avg_wm_loss:.4f} (Recon: {avg_reconstruction_loss:.4f}, KL: {avg_kl_loss:.4f})")
-            #         if actor_loss_value is not None:
-            #             logger.info(f"  Actor Loss: {actor_loss_value:.4f}, Critic Loss: {critic_loss_value:.4f}")
+            if iteration % 10 == 0:
+                logger.info(f"Iteration {iteration}: Steps={global_step}/{cfg.total_env_steps}, Buffer size={len(replay_buffer)}, Episodes finished={episodes_finished}")
+                logger.info(f"  Reward: {np.mean(rewards):.4f}, ActionDistFromCenter: {mean_action_distance_from_center:.4f}, RandomFrac: {random_action_fraction:.2f}")
+                if len(replay_buffer) >= cfg.min_buffer_size_before_training:
+                    logger.info(f"  WM Loss: {avg_wm_loss:.4f} (Recon: {avg_reconstruction_loss:.4f}, KL: {avg_kl_loss:.4f})")
+                    if actor_loss_value is not None:
+                        logger.info(f"  Actor Loss: {actor_loss_value:.4f}, Critic Loss: {critic_loss_value:.4f}")
             iteration += 1
 
     # Save models

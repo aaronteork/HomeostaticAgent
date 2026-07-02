@@ -28,6 +28,8 @@ class DreamerConfig(EnvConfig):
     replay_capacity: int = 500_000  # paper is originally 5e6
     min_buffer_size_before_training: int | None = None
     online_batch_fraction: float = 0.5
+    seed_steps: int = 50_000
+    exploration_epsilon: float = 0.1
 
     # World model loss
     world_model_grad_norm_clip: float = 1000.0

@@ -1581,8 +1581,22 @@ class SequenceReplayBuffer:
             return None
 
         max_start = time_len - self.batch_length + 1
-        start_indices = self._rng.integers(0, max_start, size=batch_size)
-        env_indices = self._rng.integers(0, self.num_workers, size=batch_size)
+        start_indices = []
+        env_indices = []
+        max_attempts = max(batch_size * 20, 100)
+        attempts = 0
+        while len(start_indices) < batch_size and attempts < max_attempts:
+            attempts += 1
+            start_idx = int(self._rng.integers(0, max_start))
+            env_idx = int(self._rng.integers(0, self.num_workers))
+            if self._sequence_crosses_reset(start_idx, env_idx):
+                continue
+            start_indices.append(start_idx)
+            env_indices.append(env_idx)
+
+        if len(start_indices) < batch_size:
+            return None
+
         return self._build_sequence_batch(
             start_indices, env_indices, force_first_reset=False
         )
@@ -1598,6 +1612,8 @@ class SequenceReplayBuffer:
         for end_idx in range(time_len, self.batch_length - 1, -self.batch_length):
             start_idx = end_idx - self.batch_length
             for env_idx in range(self.num_workers):
+                if self._sequence_crosses_reset(start_idx, env_idx):
+                    continue
                 starts.append(start_idx)
                 envs.append(env_idx)
                 if len(starts) == batch_size:
@@ -1608,6 +1624,20 @@ class SequenceReplayBuffer:
         if not starts:
             return None
         return self._build_sequence_batch(starts, envs, force_first_reset=False)
+
+    def _sequence_crosses_reset(self, start_idx, env_idx):
+        """Reject chunks that cross autoreset boundaries mid-sequence.
+
+        The replay rows store obs_t with action_t, reward_{t+1}, done_{t+1}.
+        If a sampled chunk crosses a vector-env autoreset, reward_t can become
+        aligned with the reset observation at t+1 rather than the terminal next
+        observation. Keeping chunks inside one episode avoids that corruption.
+        """
+        end_idx = start_idx + self.batch_length
+        for idx in range(start_idx + 1, end_idx):
+            if self.episode_starts[idx][env_idx]:
+                return True
+        return False
 
     def _merge_batches(self, batches):
         batches = [batch for batch in batches if batch is not None and batch["obs"]]
