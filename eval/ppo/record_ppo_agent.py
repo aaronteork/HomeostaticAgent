@@ -18,14 +18,14 @@ def record_ppo():
     # Set up model
     print(f"Using device: {config.device}")
     agent = HomeostaticPPO(config).to(config.device)
-    checkpoint = torch.load("models/PPO_4000_rollout.pt", map_location=config.device)
+    checkpoint = torch.load("models/ppo_agent_2026-07-03_06-11-09.pt", map_location=config.device)
     agent.load_state_dict(checkpoint)
     agent.eval()
 
     # Set up video recorder
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out_pov = cv2.VideoWriter("./eval/ppo/ppo_random_pov_video.mp4", fourcc, 30, (512, 512))
-    out_env = cv2.VideoWriter("./eval/ppo/ppo_random_env_video.mp4", fourcc, 30, (512, 512))
+    out_pov = cv2.VideoWriter("./eval/ppo/ppo_deterministic_pov_video.mp4", fourcc, 30, (512, 512))
+    out_env = cv2.VideoWriter("./eval/ppo/ppo_deterministic_env_video.mp4", fourcc, 30, (512, 512))
 
     episode_reward = []
     episode_food = []
@@ -53,7 +53,7 @@ def record_ppo():
 
         # Get action from agent
         with torch.no_grad():
-            action, _, _, _ = agent(vision, proprioception, internal_state, deterministic=False)
+            action, _, _, _ = agent(vision, proprioception, internal_state, deterministic=True)
             action = action.cpu().numpy().squeeze(0)
 
         # Step environment
@@ -87,7 +87,7 @@ def record_ppo():
             "thirst": episode_thirst,
         }
     )
-    episode_stats.to_csv("./eval/ppo/ppo_random_episode_stats.csv", index=False)
+    episode_stats.to_csv("./eval/ppo/ppo_deterministic_episode_stats.csv", index=False)
 
     out_pov.release()
     out_env.release()

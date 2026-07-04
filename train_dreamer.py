@@ -184,6 +184,7 @@ def train_dreamer():
                             "episode/termination_reason": infos["termination_reason"][i],
                             "episode/final_hunger": infos["hunger"][i],
                             "episode/final_thirst": infos["thirst"][i],
+                            'global_step': global_step,
                         },
                         step=episodes_finished,
                     )
@@ -408,29 +409,29 @@ def train_dreamer():
                         actor_loss_value = None
                         critic_loss_value = None
 
-            # Log only the same high-level training metrics as train_ppo.py so
-            # Dreamer and PPO runs are directly comparable in MLflow.
-            metrics_to_log = {
-                'global_step': global_step,
-                'train/policy_loss': actor_loss_value if actor_loss_value is not None else 0,
-                'train/value_loss': critic_loss_value if critic_loss_value is not None else 0,
-                'train/entropy': ac_metrics.get('actor_critic/entropy', 0),
-                'train/learning_rate': actor_optimizer.param_groups[0]['lr'],
-                'train/kl_divergence': avg_kl_loss,
-                'train/average_episode_length': avg_episode_length,
-                'train/episodes_finished': episodes_finished,
-                'train/explained_variance': ac_metrics.get('actor_critic/explained_variance', 0),
-            }
+                # Log only the same high-level training metrics as train_ppo.py so
+                # Dreamer and PPO runs are directly comparable in MLflow.
+            # if iteration % 10 == 0:
+            #     metrics_to_log = {
+            #         'global_step': global_step,
+            #         'train/policy_loss': actor_loss_value if actor_loss_value is not None else 0,
+            #         'train/value_loss': critic_loss_value if critic_loss_value is not None else 0,
+            #         'train/entropy': ac_metrics.get('actor_critic/entropy', 0),
+            #         'train/learning_rate': actor_optimizer.param_groups[0]['lr'],
+            #         'train/kl_divergence': avg_kl_loss,
+            #         'train/average_episode_length': avg_episode_length,
+            #         'train/episodes_finished': episodes_finished,
+            #         'train/explained_variance': ac_metrics.get('actor_critic/explained_variance', 0),
+            #     }
 
-            mlflow.log_metrics(metrics_to_log, step=iteration)
+            #     mlflow.log_metrics(metrics_to_log, step=iteration)
 
-            if iteration % 10 == 0:
-                logger.info(f"Iteration {iteration}: Steps={global_step}/{cfg.total_env_steps}, Buffer size={len(replay_buffer)}, Episodes finished={episodes_finished}")
-                logger.info(f"  Reward: {np.mean(rewards):.4f}, ActionDistFromCenter: {mean_action_distance_from_center:.4f}, RandomFrac: {random_action_fraction:.2f}")
-                if len(replay_buffer) >= cfg.min_buffer_size_before_training:
-                    logger.info(f"  WM Loss: {avg_wm_loss:.4f} (Recon: {avg_reconstruction_loss:.4f}, KL: {avg_kl_loss:.4f})")
-                    if actor_loss_value is not None:
-                        logger.info(f"  Actor Loss: {actor_loss_value:.4f}, Critic Loss: {critic_loss_value:.4f}")
+                # logger.info(f"Iteration {iteration}: Steps={global_step}/{cfg.total_env_steps}, Buffer size={len(replay_buffer)}, Episodes finished={episodes_finished}")
+                # logger.info(f"  Reward: {np.mean(rewards):.4f}, ActionDistFromCenter: {mean_action_distance_from_center:.4f}, RandomFrac: {random_action_fraction:.2f}")
+                # if len(replay_buffer) >= cfg.min_buffer_size_before_training:
+                #     logger.info(f"  WM Loss: {avg_wm_loss:.4f} (Recon: {avg_reconstruction_loss:.4f}, KL: {avg_kl_loss:.4f})")
+                #     if actor_loss_value is not None:
+                #         logger.info(f"  Actor Loss: {actor_loss_value:.4f}, Critic Loss: {critic_loss_value:.4f}")
             iteration += 1
 
     # Save models
