@@ -42,6 +42,7 @@ class DreamerConfig(EnvConfig):
     kl_weight: float = 1.0
     reward_weight: float = 1.0
     terminal_weight: float = 1.0
+    continue_initial_logit: float = 5.0
 
     # Imagination and optimisation
     imagine_horizon: int = 15

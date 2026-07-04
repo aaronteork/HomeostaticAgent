@@ -256,10 +256,14 @@ def compute_world_model_loss(
     reward_dist = reward_predictor(reward_latent)  # two-hot distribution over rewards
     reward_loss = -reward_dist.log_prob(reward_target).mean()
 
-    # ===== Terminal/Done Prediction Loss =====
-    predicted_terminal = terminal_predictor(reward_latent)  # (batch, seq_len, 1)
+    # ===== Continue Prediction Loss =====
+    # Dreamer predicts continuation p(not terminal), not terminal probability.
+    # Convert replay dones here and convert back to terminal probabilities during
+    # imagination for the existing lambda-return helpers.
+    predicted_continue = terminal_predictor(reward_latent)  # (batch, seq_len, 1)
     done_target = done.contiguous().view(batch_size, seq_len, 1).float()
-    terminal_loss = F.binary_cross_entropy(predicted_terminal, done_target)
+    continue_target = 1.0 - done_target
+    terminal_loss = F.binary_cross_entropy(predicted_continue, continue_target)
 
     # ===== Combined Loss with Weighting =====
     loss = (
@@ -283,6 +287,9 @@ def compute_world_model_loss(
         "world_model/rep_loss": rep_loss.item(),
         "world_model/reward_loss": reward_loss.item(),
         "world_model/terminal_loss": terminal_loss.item(),
+        "world_model/predicted_continue": predicted_continue.mean().item(),
+        "world_model/predicted_terminal": (1.0 - predicted_continue).mean().item(),
+        "world_model/target_terminal": done_target.mean().item(),
         "world_model/total_loss": loss.item(),
     }
     if "heat_sensor" in recon_losses:
@@ -355,8 +362,8 @@ def imagination_rollout(
             imagined_latents.append(latent)
             reward_dist = reward_predictor(latent)
             imagined_rewards.append(reward_dist.mean.squeeze(-1))
-            terminal_prob = terminal_predictor(latent)
-            imagined_terminals.append(terminal_prob.squeeze(-1))
+            continue_prob = terminal_predictor(latent)
+            imagined_terminals.append((1.0 - continue_prob).squeeze(-1))
 
     imagined_latents = torch.stack(
         imagined_latents, dim=1
@@ -1351,7 +1358,7 @@ class RewardPredictor(nn.Module):
 
 
 class ContinuePredictor(nn.Module):
-    """Predict terminal probability from latent state."""
+    """Predict continuation probability from latent state."""
 
     def __init__(self, config: DreamerConfig):
         super().__init__()
@@ -1368,9 +1375,13 @@ class ContinuePredictor(nn.Module):
                 nn.init.orthogonal_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
+        nn.init.zeros_(self.terminal_projection[0].weight)
+        nn.init.constant_(
+            self.terminal_projection[0].bias, self.config.continue_initial_logit
+        )
 
     def forward(self, latent):
-        """Predict terminal probability from latent state."""
+        """Predict continuation probability from latent state."""
         latent = to_tensor(latent, self.config.device)
         return self.terminal_projection(self.net(latent))
 
