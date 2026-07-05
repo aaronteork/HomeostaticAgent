@@ -17,14 +17,14 @@ class DreamerConfig(EnvConfig):
     batch_length: int = 64
     total_env_steps: int = 5_000_000
     replay_ratio: int = 128   # Was originally 512 to follow the paper for visual control but reduced to speed things up
-    total_updates: int = 1_000
+    # total_updates: int = 1_000
     adam_eps: float = 1e-5
     two_hot_bins: int = 255
     two_hot_high: float = 20.0
     two_hot_low: float = -20.0
 
     # Replay buffer parameters
-    replay_scaling: int = 64
+    # replay_scaling: int = 64
     replay_capacity: int = 500_000  # paper is originally 5e6
     min_buffer_size_before_training: int | None = None
     online_batch_fraction: float = 0.5
@@ -48,7 +48,7 @@ class DreamerConfig(EnvConfig):
     imagine_horizon: int = 15
     imagine_last: int = 0
     imagine_batch_size: int = 16
-    world_model_grad_steps_per_update: int = 1
+    # world_model_grad_steps_per_update: int = 1
     world_model_lr: float = 1e-4
     ent_coef: float = 3e-4
     return_norm_rate: float = 0.01
@@ -58,7 +58,7 @@ class DreamerConfig(EnvConfig):
 
     # Actor and critic
     actor_lr: float = 3e-5
-    actor_critic_grad_steps_per_update: int = 1
+    # actor_critic_grad_steps_per_update: int = 1
     actor_grad_norm_clip: float = 100.0
 
     critic_lr: float = 3e-5

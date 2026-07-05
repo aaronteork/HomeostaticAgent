@@ -42,7 +42,7 @@ def train_dreamer():
 
     # Create environment
     env = create_env(cfg, multiple_env=True)
-    frame_skip = env.envs[0].unwrapped.frame_skip
+    # frame_skip = env.envs[0].unwrapped.frame_skip
     logger.info(f"Created parallel environment with {cfg.num_workers} workers")
 
     # Create world model
@@ -98,7 +98,7 @@ def train_dreamer():
     previous_stochastic = None
     iteration = 0
     batch_steps = cfg.batch_size * cfg.batch_length
-    should_train = Ratio(cfg.replay_ratio / (batch_steps * frame_skip))
+    should_train = Ratio(cfg.replay_ratio / (batch_steps))  # Removed frame skip from the denominator for now
 
     with mlflow.start_run(run_name="Dreamer V3 Training - " + dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")):
         mlflow.log_params(asdict(cfg))
@@ -233,6 +233,8 @@ def train_dreamer():
             avg_terminal_loss = 0.0
             avg_predicted_terminal = 0.0
             avg_target_terminal = 0.0
+            replay_terminal_count = 0.0
+            replay_terminal_items = 0
             if len(replay_buffer) >= cfg.min_buffer_size_before_training:
                 train_batches_due = should_train(global_step)
 
@@ -248,6 +250,8 @@ def train_dreamer():
                 total_terminal_loss = 0
                 total_predicted_terminal = 0
                 total_target_terminal = 0
+                total_replay_terminal_count = 0.0
+                total_replay_terminal_items = 0
 
                 for wm_step in range(train_batches_due):
                     # Sample fresh online sequences first, then fill with uniform replay.
@@ -269,6 +273,8 @@ def train_dreamer():
                         initial_stochastic,
                         initial_recurrent,
                     ) = prepare_sequence_batch(batch_data, cfg)
+                    total_replay_terminal_count += float(dones_batch.sum().item())
+                    total_replay_terminal_items += int(dones_batch.numel())
 
                     embed_batch = world_model.encode(obs_batch_flat).view(batch_size, seq_len, -1)
 
@@ -307,6 +313,8 @@ def train_dreamer():
                 avg_terminal_loss = total_terminal_loss / max(num_wm_updates, 1)
                 avg_predicted_terminal = total_predicted_terminal / max(num_wm_updates, 1)
                 avg_target_terminal = total_target_terminal / max(num_wm_updates, 1)
+                replay_terminal_count = total_replay_terminal_count
+                replay_terminal_items = total_replay_terminal_items
 
                 # ===== PHASE 3: Imagination Rollout & Actor-Critic Training =====
                 if num_wm_updates > 0 and global_step >= cfg.seed_steps:
@@ -464,6 +472,8 @@ def train_dreamer():
                         "  Diagnostics: "
                         f"WMUpdates={num_wm_updates}/{train_batches_due}, ACUpdates={num_ac_updates}, "
                         f"WMSampleFails={wm_sample_failures}, ACSampleFails={ac_sample_failures}, "
+                        f"ReplayTerminals={replay_terminal_count:.0f}/{replay_terminal_items} "
+                        f"({replay_terminal_count / max(replay_terminal_items, 1):.6f}), "
                         f"ActorGradNorm={last_actor_grad_norm:.4f}, "
                         f"PredTerminal={avg_predicted_terminal:.4f}, TargetTerminal={avg_target_terminal:.4f}"
                     )

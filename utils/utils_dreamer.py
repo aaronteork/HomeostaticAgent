@@ -339,6 +339,7 @@ def imagination_rollout(
     recurrent_state = init_recurrent_state.detach()
 
     imagined_latents = []
+    imagined_actor_latents = []
     imagined_actions = []
     imagined_rewards = []
     imagined_terminals = []
@@ -346,6 +347,7 @@ def imagination_rollout(
     imagined_log_probs = []
 
     for step in range(horizon):
+        imagined_actor_latents.append(latent)
         action, _, dist = actor(latent.detach(), deterministic=False)
         imagined_actions.append(action)
         imagined_log_probs.append(dist.log_prob(action.detach()).sum(dim=-1))
@@ -368,6 +370,9 @@ def imagination_rollout(
     imagined_latents = torch.stack(
         imagined_latents, dim=1
     )  # (batch, horizon, latent_dim)
+    imagined_actor_latents = torch.stack(
+        imagined_actor_latents, dim=1
+    )  # (batch, horizon, latent_dim), states that produced each action
     imagined_actions = torch.stack(
         imagined_actions, dim=1
     )  # (batch, horizon, action_dim)
@@ -378,6 +383,7 @@ def imagination_rollout(
 
     return {
         "latents": imagined_latents,
+        "actor_latents": imagined_actor_latents,
         "actions": imagined_actions,
         "rewards": imagined_rewards,
         "terminals": imagined_terminals,
@@ -472,7 +478,12 @@ def compute_actor_critic_loss(
         critic_loss: scalar
         metrics: dict with loss components
     """
-    latents = imagined_trajectories["latents"]
+    # `latents` are the post-action states used to predict rewards and terminals.
+    # Policy log-probs were produced from the pre-action states, so the actor and
+    # value losses must use those same states for correct temporal alignment.
+    latents = imagined_trajectories.get(
+        "actor_latents", imagined_trajectories["latents"]
+    )
     rewards = imagined_trajectories["rewards"]
     terminals = imagined_trajectories["terminals"]
     entropies = imagined_trajectories["entropies"]
