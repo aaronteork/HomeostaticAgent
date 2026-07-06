@@ -39,6 +39,9 @@ def train_dreamer():
     # Get config
     cfg = DreamerConfig()
     logger.info(f"Config: {cfg}")
+    
+    # Check that the config does not have frame stack key
+    assert not hasattr(cfg, "frame_stack_key"), "DreamerConfig should not have frame_stack_key attribute"
 
     # Create environment
     env = create_env(cfg, multiple_env=True)
@@ -144,6 +147,7 @@ def train_dreamer():
                 action, log_prob, dist = actor(latent, deterministic=False)
                 action = action.detach().cpu().numpy()
 
+                # TODO: Maybe delete this after debugging, but keep it for now to ensure that the actions are valid
                 if global_step < cfg.seed_steps:
                     action = env.action_space.sample()
                     random_action_fraction = 1.0
@@ -165,6 +169,7 @@ def train_dreamer():
             # Step environment
             next_obs, rewards, terminations, truncations, infos = env.step(action)
             done = terminations | truncations
+            # TODO: Remove this
             mean_action_distance_from_center = float(np.mean(np.abs(action - 0.5)))
             action_std = float(np.std(action))
 
@@ -210,6 +215,7 @@ def train_dreamer():
             obs = next_obs
             prev_action = to_tensor(action, cfg.device)
             is_first = to_tensor(done, cfg.device)
+            # Zero out recurrent and stochastic state if the episode ends, the zeroing out is not technically necessary since we will use is_first to reset the states
             recurrent_state = recurrent_state * (1.0 - is_first.unsqueeze(-1))
             previous_stochastic = previous_stochastic * (1.0 - is_first.view(-1, 1, 1))
             global_step += cfg.num_workers
@@ -444,41 +450,41 @@ def train_dreamer():
 
                 # Log only the same high-level training metrics as train_ppo.py so
                 # Dreamer and PPO runs are directly comparable in MLflow.
-            if iteration % 10 == 0:
-                metrics_to_log = {
-                    'global_step': global_step,
-                    'train/policy_loss': actor_loss_value if actor_loss_value is not None else 0,
-                    'train/value_loss': critic_loss_value if critic_loss_value is not None else 0,
-                    'train/entropy': ac_metrics.get('actor_critic/entropy', 0),
-                    'train/learning_rate': actor_optimizer.param_groups[0]['lr'],
-                    'train/kl_divergence': avg_kl_loss,
-                    'train/average_episode_length': avg_episode_length,
-                    'train/episodes_finished': episodes_finished,
-                    'train/explained_variance': ac_metrics.get('actor_critic/explained_variance', 0),
-                }
+            # if iteration % 10 == 0:
+            #     metrics_to_log = {
+            #         'global_step': global_step,
+            #         'train/policy_loss': actor_loss_value if actor_loss_value is not None else 0,
+            #         'train/value_loss': critic_loss_value if critic_loss_value is not None else 0,
+            #         'train/entropy': ac_metrics.get('actor_critic/entropy', 0),
+            #         'train/learning_rate': actor_optimizer.param_groups[0]['lr'],
+            #         'train/kl_divergence': avg_kl_loss,
+            #         'train/average_episode_length': avg_episode_length,
+            #         'train/episodes_finished': episodes_finished,
+            #         'train/explained_variance': ac_metrics.get('actor_critic/explained_variance', 0),
+            #     }
 
-                mlflow.log_metrics(metrics_to_log, step=iteration)
+            #     mlflow.log_metrics(metrics_to_log, step=iteration)
 
-                logger.info(f"Iteration {iteration}: Steps={global_step}/{cfg.total_env_steps}, Buffer size={len(replay_buffer)}, Episodes finished={episodes_finished}")
-                logger.info(f"  Reward: {np.mean(rewards):.4f}, ActionDistFromCenter: {mean_action_distance_from_center:.4f}, RandomFrac: {random_action_fraction:.2f}")
-                if len(replay_buffer) >= cfg.min_buffer_size_before_training:
-                    logger.info(
-                        "  WM Loss: "
-                        f"{avg_wm_loss:.4f} "
-                        f"(Recon: {avg_reconstruction_loss:.4f}, KL: {avg_kl_loss:.4f}, "
-                        f"Reward: {avg_reward_loss:.4f}, Continue: {avg_terminal_loss:.4f})"
-                    )
-                    logger.info(
-                        "  Diagnostics: "
-                        f"WMUpdates={num_wm_updates}/{train_batches_due}, ACUpdates={num_ac_updates}, "
-                        f"WMSampleFails={wm_sample_failures}, ACSampleFails={ac_sample_failures}, "
-                        f"ReplayTerminals={replay_terminal_count:.0f}/{replay_terminal_items} "
-                        f"({replay_terminal_count / max(replay_terminal_items, 1):.6f}), "
-                        f"ActorGradNorm={last_actor_grad_norm:.4f}, "
-                        f"PredTerminal={avg_predicted_terminal:.4f}, TargetTerminal={avg_target_terminal:.4f}"
-                    )
-                    if actor_loss_value is not None:
-                        logger.info(f"  Actor Loss: {actor_loss_value:.4f}, Critic Loss: {critic_loss_value:.4f}")
+            #     logger.info(f"Iteration {iteration}: Steps={global_step}/{cfg.total_env_steps}, Buffer size={len(replay_buffer)}, Episodes finished={episodes_finished}")
+            #     logger.info(f"  Reward: {np.mean(rewards):.4f}, ActionDistFromCenter: {mean_action_distance_from_center:.4f}, RandomFrac: {random_action_fraction:.2f}")
+            #     if len(replay_buffer) >= cfg.min_buffer_size_before_training:
+            #         logger.info(
+            #             "  WM Loss: "
+            #             f"{avg_wm_loss:.4f} "
+            #             f"(Recon: {avg_reconstruction_loss:.4f}, KL: {avg_kl_loss:.4f}, "
+            #             f"Reward: {avg_reward_loss:.4f}, Continue: {avg_terminal_loss:.4f})"
+            #         )
+            #         logger.info(
+            #             "  Diagnostics: "
+            #             f"WMUpdates={num_wm_updates}/{train_batches_due}, ACUpdates={num_ac_updates}, "
+            #             f"WMSampleFails={wm_sample_failures}, ACSampleFails={ac_sample_failures}, "
+            #             f"ReplayTerminals={replay_terminal_count:.0f}/{replay_terminal_items} "
+            #             f"({replay_terminal_count / max(replay_terminal_items, 1):.6f}), "
+            #             f"ActorGradNorm={last_actor_grad_norm:.4f}, "
+            #             f"PredTerminal={avg_predicted_terminal:.4f}, TargetTerminal={avg_target_terminal:.4f}"
+            #         )
+            #         if actor_loss_value is not None:
+            #             logger.info(f"  Actor Loss: {actor_loss_value:.4f}, Critic Loss: {critic_loss_value:.4f}")
             iteration += 1
 
     # Save models

@@ -234,9 +234,9 @@ def compute_world_model_loss(
 
     dyn_loss = dyn_loss / len(prior_dists)
     rep_loss = rep_loss / len(prior_dists)
-    kl_loss = config.dyn_loss_weight * dyn_loss + config.rep_loss_weight * rep_loss
 
     # ===== Reward Prediction Loss =====
+    # Reward prediction should fall under prediction loss
     # Replay stores (obs_t, action_t, reward_{t+1}, done_{t+1}), while the
     # posterior latent at index t is built from obs_t and action_{t-1}. Predict
     # each transition target from the one-step prior produced by latent_t and
@@ -257,6 +257,7 @@ def compute_world_model_loss(
     reward_loss = -reward_dist.log_prob(reward_target).mean()
 
     # ===== Continue Prediction Loss =====
+    # Continue prediction should fall under prediction loss
     # Dreamer predicts continuation p(not terminal), not terminal probability.
     # Convert replay dones here and convert back to terminal probabilities during
     # imagination for the existing lambda-return helpers.
@@ -268,9 +269,10 @@ def compute_world_model_loss(
     # ===== Combined Loss with Weighting =====
     loss = (
         recon_loss
-        + config.kl_weight * kl_loss
         + config.reward_weight * reward_loss
         + config.terminal_weight * terminal_loss
+        + config.dyn_loss_weight * dyn_loss
+        + config.rep_loss_weight * rep_loss
     )
 
     metrics = {
@@ -282,7 +284,6 @@ def compute_world_model_loss(
         "world_model/reconstruction_internal_state_loss": recon_losses[
             "internal_state"
         ].item(),
-        "world_model/kl_loss": kl_loss.item(),
         "world_model/dyn_loss": dyn_loss.item(),
         "world_model/rep_loss": rep_loss.item(),
         "world_model/reward_loss": reward_loss.item(),
@@ -700,7 +701,8 @@ class PercentileEMANormalizer:
 
 
 class Ratio:
-    """Reference-style scheduler for update-to-environment-step ratios."""
+    """Reference-style scheduler for update-to-environment-step ratios.
+    The conversion to integers helps to determine if we need to train any batches"""
 
     def __init__(self, ratio: float):
         if ratio < 0:
@@ -1151,6 +1153,7 @@ class RSSM(nn.Module):
             prior_dists: list of prior distributions
             posterior_dists: list of posterior distributions
         """
+        # Check if there is any time dimension. If not, add a time dimension for a single step
         if len(action.shape) == 2:
             action = action.unsqueeze(1)
             embed = embed.unsqueeze(1)
@@ -1158,9 +1161,10 @@ class RSSM(nn.Module):
             squeeze_output = True
         else:
             squeeze_output = False
-
         batch_size, seq_len, _ = action.shape
 
+        # Add initial state if it is not present
+        # Also create initial state for resets
         initial_stochastic, initial_recurrent = self.initial_state(
             batch_size,
             action.device,
@@ -1175,7 +1179,6 @@ class RSSM(nn.Module):
         prior_dists = []
         posterior_dists = []
         latents = []
-
         for t in range(seq_len):
             # Reset recurrent state on episode start
             reset_mask = 1.0 - is_first[:, t : t + 1].to(dtype=action.dtype)
@@ -1188,11 +1191,12 @@ class RSSM(nn.Module):
             step_action = action[:, t] * reset_mask
 
             # Compute h_t from z_{t-1} and a_{t-1}, then predict prior/posterior.
+            # a_{t-1} seems to be action[: t], by design
             recurrent_state = self.recurrent_step(
                 previous_stochastic, step_action, recurrent_state
             )
             prior_logits = self.prior_logits(recurrent_state)
-            posterior_logits = self.posterior_logits(recurrent_state, embed[:, t])
+            posterior_logits = self.posterior_logits(recurrent_state, embed[:, t])  # But embed[: t] is o_t, by design
             prior_dist = self._dist(prior_logits)
             posterior_dist = self._dist(posterior_logits)
             prior_dists.append(prior_dist)
@@ -1533,7 +1537,12 @@ class SequenceReplayBuffer:
             self._pending_context_recurrents = []
 
     def _build_sequence_batch(self, start_indices, env_indices, force_first_reset):
-        """Build same-worker contiguous sequences and keep replay coordinates."""
+        """Build same-worker contiguous sequences and keep replay coordinates.
+
+        Sequences may cross episode boundaries. Boundary rows carry
+        is_first=True, and their previous action is zeroed so the RSSM reset
+        does not receive an action from the previous episode.
+        """
         obs_sequences = []
         action_sequences = []
         prev_action_sequences = []
@@ -1555,11 +1564,15 @@ class SequenceReplayBuffer:
             prev_action_seq = []
             for i in range(self.batch_length):
                 item_idx = start_idx + i
-                if i == 0:
-                    if start_idx > 0 and not self.episode_starts[start_idx][env_idx]:
+                if force_first_reset and i == 0:
+                    prev_action = np.zeros_like(self.actions[item_idx][env_idx])
+                elif self.episode_starts[item_idx][env_idx]:
+                    prev_action = np.zeros_like(self.actions[item_idx][env_idx])
+                elif i == 0:
+                    if start_idx > 0:
                         prev_action = self.actions[start_idx - 1][env_idx]
                     else:
-                        prev_action = np.zeros_like(self.actions[start_idx][env_idx])
+                        prev_action = np.zeros_like(self.actions[item_idx][env_idx])
                 else:
                     prev_action = self.actions[item_idx - 1][env_idx]
                 prev_action_seq.append(prev_action)
@@ -1607,7 +1620,7 @@ class SequenceReplayBuffer:
         }
 
     def _sample_uniform(self, batch_size):
-        """Sample same-worker contiguous sequences from the whole buffer."""
+        """Sample fixed-length same-worker sequences from the whole buffer."""
         time_len = len(self.observations)
         if (
             len(self) < self.config.min_buffer_size_before_training
@@ -1616,21 +1629,12 @@ class SequenceReplayBuffer:
             return None
 
         max_start = time_len - self.batch_length + 1
-        start_indices = []
-        env_indices = []
-        max_attempts = max(batch_size * 20, 100)
-        attempts = 0
-        while len(start_indices) < batch_size and attempts < max_attempts:
-            attempts += 1
-            start_idx = int(self._rng.integers(0, max_start))
-            env_idx = int(self._rng.integers(0, self.num_workers))
-            if self._sequence_crosses_reset(start_idx, env_idx):
-                continue
-            start_indices.append(start_idx)
-            env_indices.append(env_idx)
-
-        if len(start_indices) < batch_size:
-            return None
+        start_indices = [
+            int(self._rng.integers(0, max_start)) for _ in range(batch_size)
+        ]
+        env_indices = [
+            int(self._rng.integers(0, self.num_workers)) for _ in range(batch_size)
+        ]
 
         return self._build_sequence_batch(
             start_indices, env_indices, force_first_reset=False
@@ -1647,8 +1651,6 @@ class SequenceReplayBuffer:
         for end_idx in range(time_len, self.batch_length - 1, -self.batch_length):
             start_idx = end_idx - self.batch_length
             for env_idx in range(self.num_workers):
-                if self._sequence_crosses_reset(start_idx, env_idx):
-                    continue
                 starts.append(start_idx)
                 envs.append(env_idx)
                 if len(starts) == batch_size:
@@ -1659,20 +1661,6 @@ class SequenceReplayBuffer:
         if not starts:
             return None
         return self._build_sequence_batch(starts, envs, force_first_reset=False)
-
-    def _sequence_crosses_reset(self, start_idx, env_idx):
-        """Reject chunks that cross autoreset boundaries mid-sequence.
-
-        The replay rows store obs_t with action_t, reward_{t+1}, done_{t+1}.
-        If a sampled chunk crosses a vector-env autoreset, reward_t can become
-        aligned with the reset observation at t+1 rather than the terminal next
-        observation. Keeping chunks inside one episode avoids that corruption.
-        """
-        end_idx = start_idx + self.batch_length
-        for idx in range(start_idx + 1, end_idx):
-            if self.episode_starts[idx][env_idx]:
-                return True
-        return False
 
     def _merge_batches(self, batches):
         batches = [batch for batch in batches if batch is not None and batch["obs"]]
