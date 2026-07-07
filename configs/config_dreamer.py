@@ -15,7 +15,7 @@ class DreamerConfig(EnvConfig):
     free_nats: float = 1.0
     batch_size: int = 16
     batch_length: int = 64
-    total_env_steps: int = 5_000_000
+    total_env_steps: int = 2_000_000
     replay_ratio: int = 128   # Was originally 512 to follow the paper for visual control but reduced to speed things up
     # total_updates: int = 1_000
     adam_eps: float = 1e-5
@@ -68,8 +68,11 @@ class DreamerConfig(EnvConfig):
     critic_replay_loss: float = 0.3
     critic_grad_norm_clip: float = 100.0
 
-    # Discount and GAE
-    gamma: float = 0.99
+    # Discount and GAE. DreamerV3 uses a horizon-based continuation discount
+    # of 1 - 1 / horizon when contdisc is enabled.
+    gamma: float = 0.997
+    horizon: int = 333
+    contdisc: bool = True
     gae_lambda: float = 0.95
 
     def __post_init__(self):
@@ -91,3 +94,9 @@ class DreamerConfig(EnvConfig):
     @property
     def latent_dim(self) -> int:
         return self.stochastic_size + self.recurrent_units
+
+    @property
+    def discount(self) -> float:
+        if self.contdisc:
+            return 1.0 - 1.0 / self.horizon
+        return self.gamma

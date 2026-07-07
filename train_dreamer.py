@@ -97,6 +97,8 @@ def train_dreamer():
     obs, info = env.reset()
     prev_action = torch.zeros(cfg.num_workers, cfg.action_space_dim, device=cfg.device)
     is_first = torch.ones(cfg.num_workers, device=cfg.device)
+    replay_reward = np.zeros(cfg.num_workers, dtype=np.float32)
+    replay_done = np.zeros(cfg.num_workers, dtype=bool)
     recurrent_state = None
     previous_stochastic = None
     iteration = 0
@@ -113,8 +115,9 @@ def train_dreamer():
             world_model.eval()
 
             list_iterations_episode_length = []
-            random_action_fraction = 0.0
+            # random_action_fraction = 0.0
             replay_is_first = is_first.detach().cpu().numpy().astype(bool)
+            replay_is_terminal = replay_done.astype(bool, copy=True)
             with torch.no_grad():
                 if recurrent_state is None or previous_stochastic is None:
                     context_stochastic, context_recurrent = world_model.rssm.initial_state(
@@ -147,34 +150,68 @@ def train_dreamer():
                 action, log_prob, dist = actor(latent, deterministic=False)
                 action = action.detach().cpu().numpy()
 
-                # TODO: Maybe delete this after debugging, but keep it for now to ensure that the actions are valid
-                if global_step < cfg.seed_steps:
-                    action = env.action_space.sample()
-                    random_action_fraction = 1.0
-                elif cfg.exploration_epsilon > 0.0:
-                    random_mask = (
-                        np.random.random(cfg.num_workers)
-                        < cfg.exploration_epsilon
-                    )
-                    if np.any(random_mask):
-                        random_actions = env.action_space.sample()
-                        action[random_mask] = random_actions[random_mask]
-                        random_action_fraction = float(np.mean(random_mask))
+                # If the current replay row is terminal, the next vector step is
+                # only used to advance SyncVectorEnv to the reset observation.
+                # Store a neutral dummy action for that terminal row; the
+                # following reset row will zero prev_action via is_first=True.
+                if np.any(replay_is_terminal):
+                    action[replay_is_terminal] = 0.5
+
+                # # TODO: Maybe delete this after debugging, but keep it for now to ensure that the actions are valid
+                # if global_step < cfg.seed_steps:
+                #     action = env.action_space.sample()
+                #     random_action_fraction = 1.0
+                # elif cfg.exploration_epsilon > 0.0:
+                #     random_mask = (
+                #         np.random.random(cfg.num_workers)
+                #         < cfg.exploration_epsilon
+                #     )
+                #     if np.any(random_mask):
+                #         random_actions = env.action_space.sample()
+                #         action[random_mask] = random_actions[random_mask]
+                #         random_action_fraction = float(np.mean(random_mask))
 
                 # Check for NaN
                 if np.any(np.isnan(action)) or np.any(np.isinf(action)):
                     logger.error(f"NaN/Inf detected in actions at iteration {iteration}!")
                     raise RuntimeError("NaN/Inf detected in actions")
 
+            # Store the current replay row before stepping, matching the official
+            # Dreamer convention: row t contains obs_t, action_t, and the
+            # reward/done that led into obs_t from action_{t-1}. The replay
+            # buffer reconstructs prev_action_t by shifting stored actions.
+            for i in range(cfg.num_workers):
+                obs_single = {
+                    "vision": obs["vision"][i:i+1],
+                    "proprioception": obs["proprioception"][i:i+1],
+                    "internal_state": obs["internal_state"][i:i+1],
+                }
+                if cfg.num_heat > 0:
+                    obs_single["heat_sensor"] = obs["heat_sensor"][i:i+1]
+
+                replay_buffer.add(
+                    obs_dict=obs_single,
+                    action=action[i:i+1],
+                    reward=replay_reward[i:i+1],
+                    done=replay_done[i:i+1],
+                    is_first=bool(replay_is_first[i]),
+                    context_stochastic=replay_context_stochastic[i:i+1],
+                    context_recurrent=replay_context_recurrent[i:i+1],
+                )
+
             # Step environment
             next_obs, rewards, terminations, truncations, infos = env.step(action)
             done = terminations | truncations
-            # TODO: Remove this
-            mean_action_distance_from_center = float(np.mean(np.abs(action - 0.5)))
-            action_std = float(np.std(action))
+            # # TODO: Remove this
+            # mean_action_distance_from_center = float(np.mean(np.abs(action - 0.5)))
+            # action_std = float(np.std(action))
 
-            # Store in replay buffer (one transition per worker)
-            episode_global_step = global_step + cfg.num_workers
+            # Log finished episodes and carry the step outcome to the next
+            # replay row, where it is aligned with the resulting observation.
+            # When the current replay row was terminal, this vector step returns
+            # the reset observation; that next row should be first with zero
+            # reward/done, not another terminal transition.
+            # episode_global_step = global_step + cfg.num_workers
             for i in range(cfg.num_workers):
                 if "_episode" in infos and infos["_episode"][i]:
                     episodes_finished += 1
@@ -194,52 +231,45 @@ def train_dreamer():
                         step=episodes_finished,
                     )
 
-                obs_single = {
-                    "vision": obs["vision"][i:i+1],
-                    "proprioception": obs["proprioception"][i:i+1],
-                    "internal_state": obs["internal_state"][i:i+1],
-                }
-                if cfg.num_heat > 0:
-                    obs_single["heat_sensor"] = obs["heat_sensor"][i:i+1]
-
-                replay_buffer.add(
-                    obs_dict=obs_single,
-                    action=action[i:i+1],
-                    reward=rewards[i:i+1],
-                    done=done[i:i+1],
-                    is_first=bool(replay_is_first[i]),
-                    context_stochastic=replay_context_stochastic[i:i+1],
-                    context_recurrent=replay_context_recurrent[i:i+1],
-                )
-
             obs = next_obs
-            prev_action = to_tensor(action, cfg.device)
-            is_first = to_tensor(done, cfg.device)
-            # Zero out recurrent and stochastic state if the episode ends, the zeroing out is not technically necessary since we will use is_first to reset the states
+            next_is_first = replay_is_terminal
+            replay_reward = rewards.astype(np.float32, copy=True)
+            replay_done = done.astype(bool, copy=True)
+            replay_reward[next_is_first] = 0.0
+            replay_done[next_is_first] = False
+
+            prev_action_np = action.copy()
+            prev_action_np[next_is_first] = 0.0
+            prev_action = to_tensor(prev_action_np, cfg.device)
+            is_first = to_tensor(next_is_first, cfg.device)
+            # Reset the live RSSM state only for rows that are actually reset
+            # observations. Terminal observations are consumed on the next loop
+            # with is_first=False so reward/continue can learn from their
+            # posterior latent.
             recurrent_state = recurrent_state * (1.0 - is_first.unsqueeze(-1))
             previous_stochastic = previous_stochastic * (1.0 - is_first.view(-1, 1, 1))
             global_step += cfg.num_workers
 
-            avg_episode_length = sum(list_iterations_episode_length) / len(list_iterations_episode_length) if list_iterations_episode_length else 0
-            avg_wm_loss = 0.0
-            avg_reconstruction_loss = 0.0
+            # avg_episode_length = sum(list_iterations_episode_length) / len(list_iterations_episode_length) if list_iterations_episode_length else 0
+            # avg_wm_loss = 0.0
+            # avg_reconstruction_loss = 0.0
             actor_loss = None
             critic_loss = None
-            actor_loss_value = None
-            critic_loss_value = None
+            # actor_loss_value = None
+            # critic_loss_value = None
             ac_metrics = {}
             num_wm_updates = 0
             num_ac_updates = 0
             train_batches_due = 0
             wm_sample_failures = 0
             ac_sample_failures = 0
-            last_actor_grad_norm = 0.0
-            avg_reward_loss = 0.0
-            avg_terminal_loss = 0.0
-            avg_predicted_terminal = 0.0
-            avg_target_terminal = 0.0
-            replay_terminal_count = 0.0
-            replay_terminal_items = 0
+            # last_actor_grad_norm = 0.0
+            # avg_reward_loss = 0.0
+            # avg_terminal_loss = 0.0
+            # avg_predicted_terminal = 0.0
+            # avg_target_terminal = 0.0
+            # replay_terminal_count = 0.0
+            # replay_terminal_items = 0
             if len(replay_buffer) >= cfg.min_buffer_size_before_training:
                 train_batches_due = should_train(global_step)
 
@@ -309,14 +339,14 @@ def train_dreamer():
                     total_target_terminal += wm_metrics['world_model/target_terminal']
                     num_wm_updates += 1
 
-                avg_wm_loss = total_wm_loss / max(num_wm_updates, 1)
-                avg_reconstruction_loss = total_reconstruction_loss / max(num_wm_updates, 1)
-                avg_reward_loss = total_reward_loss / max(num_wm_updates, 1)
-                avg_terminal_loss = total_terminal_loss / max(num_wm_updates, 1)
-                avg_predicted_terminal = total_predicted_terminal / max(num_wm_updates, 1)
-                avg_target_terminal = total_target_terminal / max(num_wm_updates, 1)
-                replay_terminal_count = total_replay_terminal_count
-                replay_terminal_items = total_replay_terminal_items
+                # avg_wm_loss = total_wm_loss / max(num_wm_updates, 1)
+                # avg_reconstruction_loss = total_reconstruction_loss / max(num_wm_updates, 1)
+                # avg_reward_loss = total_reward_loss / max(num_wm_updates, 1)
+                # avg_terminal_loss = total_terminal_loss / max(num_wm_updates, 1)
+                # avg_predicted_terminal = total_predicted_terminal / max(num_wm_updates, 1)
+                # avg_target_terminal = total_target_terminal / max(num_wm_updates, 1)
+                # replay_terminal_count = total_replay_terminal_count
+                # replay_terminal_items = total_replay_terminal_items
 
                 # ===== PHASE 3: Imagination Rollout & Actor-Critic Training =====
                 if num_wm_updates > 0 and global_step >= cfg.seed_steps:
@@ -408,11 +438,11 @@ def train_dreamer():
 
                         actor_optimizer.zero_grad()
                         actor_loss.backward()
-                        last_actor_grad_norm = float(
-                            torch.nn.utils.clip_grad_norm_(
-                                actor.parameters(), cfg.actor_grad_norm_clip
-                            )
-                        )
+                        # last_actor_grad_norm = float(
+                        #     torch.nn.utils.clip_grad_norm_(
+                        #         actor.parameters(), cfg.actor_grad_norm_clip
+                        #     )
+                        # )
                         actor_optimizer.step()
                         # actor_scheduler.step()
 
@@ -434,15 +464,15 @@ def train_dreamer():
                     set_requires_grad([world_model], True)
 
                     if num_ac_updates > 0:
-                        actor_loss_value = total_actor_loss / num_ac_updates
-                        critic_loss_value = total_critic_loss / num_ac_updates
+                        # actor_loss_value = total_actor_loss / num_ac_updates
+                        # critic_loss_value = total_critic_loss / num_ac_updates
                         ac_metrics = {
                             key: value / num_ac_updates
                             for key, value in total_ac_metrics.items()
                         }
-                    else:
-                        actor_loss_value = None
-                        critic_loss_value = None
+                    # else:
+                    #     actor_loss_value = None
+                    #     critic_loss_value = None
 
                 # Log only the same high-level training metrics as train_ppo.py so
                 # Dreamer and PPO runs are directly comparable in MLflow.

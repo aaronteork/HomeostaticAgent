@@ -48,6 +48,43 @@ def set_requires_grad(modules, requires_grad):
             param.requires_grad_(requires_grad)
 
 
+def continuation_training_target(done: Tensor, config: DreamerConfig) -> Tensor:
+    """Target for the continue head.
+
+    With DreamerV3's contdisc convention, the continue head predicts discounted
+    continuation directly. Otherwise, it predicts pure p(not terminal).
+    """
+    continue_target = 1.0 - done.float()
+    if config.contdisc:
+        continue_target = continue_target * config.discount
+    return continue_target
+
+
+def continuation_for_returns_from_done(done: Tensor, config: DreamerConfig) -> Tensor:
+    """Convert replay terminal flags to the continuation used by lambda returns."""
+    return (1.0 - done.float()) * config.discount
+
+
+def continuation_for_returns_from_prediction(
+    predicted_continue: Tensor, config: DreamerConfig
+) -> Tensor:
+    """Convert continue-head output to lambda-return continuation."""
+    if config.contdisc:
+        return predicted_continue
+    return predicted_continue * config.gamma
+
+
+def terminal_probability_from_continue(
+    predicted_continue: Tensor, config: DreamerConfig
+) -> Tensor:
+    """Diagnostic terminal probability from continue-head output."""
+    if config.contdisc:
+        continue_prob = (predicted_continue / config.discount).clamp(0.0, 1.0)
+    else:
+        continue_prob = predicted_continue
+    return 1.0 - continue_prob
+
+
 # ------------------ Data and replay preparation ------------------------
 def stack_sequence_observations(obs_sequences, cfg):
     keys = ["vision", "proprioception", "internal_state"]
@@ -141,8 +178,6 @@ def prepare_sequence_batch(batch_data, cfg):
 
 
 # ------------------ World Model Training functions ---------------------------
-
-
 def compute_world_model_loss(
     rssm,
     decoder,
@@ -236,35 +271,22 @@ def compute_world_model_loss(
     rep_loss = rep_loss / len(prior_dists)
 
     # ===== Reward Prediction Loss =====
-    # Reward prediction should fall under prediction loss
-    # Replay stores (obs_t, action_t, reward_{t+1}, done_{t+1}), while the
-    # posterior latent at index t is built from obs_t and action_{t-1}. Predict
-    # each transition target from the one-step prior produced by latent_t and
-    # action_t. This keeps terminal transitions learnable even when the vector
-    # env autoresets on the next row and reset-crossing chunks are rejected.
-    latent_flat = latent.reshape(batch_size * seq_len, -1)
-    _, recurrent_flat = rssm.split_feature(latent_flat)
-    action_flat = action.reshape(batch_size * seq_len, -1)
-    reward_latent, _, _ = rssm.imagine_step(
-        latent_flat,
-        recurrent_flat,
-        action_flat,
-        deterministic=False,
-    )
-    reward_latent = reward_latent.view(batch_size, seq_len, -1)
+    # Replay rows follow the Dreamer convention: latent_t is built from
+    # (obs_t, action_{t-1}), and reward_t/done_t are the transition outcome that
+    # led into obs_t. Train reward and continuation from the posterior feature,
+    # matching the official DreamerV3 world-model loss.
     reward_target = reward.contiguous().view(batch_size, seq_len, 1)
-    reward_dist = reward_predictor(reward_latent)  # two-hot distribution over rewards
+    reward_dist = reward_predictor(latent)  # two-hot distribution over rewards
     reward_loss = -reward_dist.log_prob(reward_target).mean()
 
     # ===== Continue Prediction Loss =====
-    # Continue prediction should fall under prediction loss
-    # Dreamer predicts continuation p(not terminal), not terminal probability.
-    # Convert replay dones here and convert back to terminal probabilities during
-    # imagination for the existing lambda-return helpers.
-    predicted_continue = terminal_predictor(reward_latent)  # (batch, seq_len, 1)
+    # DreamerV3 predicts continuation, and with contdisc enabled it predicts the
+    # discounted continuation used directly in lambda returns.
+    predicted_continue = terminal_predictor(latent)  # (batch, seq_len, 1)
     done_target = done.contiguous().view(batch_size, seq_len, 1).float()
-    continue_target = 1.0 - done_target
+    continue_target = continuation_training_target(done_target, config)
     terminal_loss = F.binary_cross_entropy(predicted_continue, continue_target)
+    predicted_terminal = terminal_probability_from_continue(predicted_continue, config)
 
     # ===== Combined Loss with Weighting =====
     loss = (
@@ -289,7 +311,7 @@ def compute_world_model_loss(
         "world_model/reward_loss": reward_loss.item(),
         "world_model/terminal_loss": terminal_loss.item(),
         "world_model/predicted_continue": predicted_continue.mean().item(),
-        "world_model/predicted_terminal": (1.0 - predicted_continue).mean().item(),
+        "world_model/predicted_terminal": predicted_terminal.mean().item(),
         "world_model/target_terminal": done_target.mean().item(),
         "world_model/total_loss": loss.item(),
     }
@@ -344,6 +366,7 @@ def imagination_rollout(
     imagined_actions = []
     imagined_rewards = []
     imagined_terminals = []
+    imagined_continues = []
     imagined_entropies = []
     imagined_log_probs = []
 
@@ -366,7 +389,16 @@ def imagination_rollout(
             reward_dist = reward_predictor(latent)
             imagined_rewards.append(reward_dist.mean.squeeze(-1))
             continue_prob = terminal_predictor(latent)
-            imagined_terminals.append((1.0 - continue_prob).squeeze(-1))
+            imagined_continues.append(
+                continuation_for_returns_from_prediction(
+                    continue_prob, config
+                ).squeeze(-1)
+            )
+            imagined_terminals.append(
+                terminal_probability_from_continue(
+                    continue_prob, config
+                ).squeeze(-1)
+            )
 
     imagined_latents = torch.stack(
         imagined_latents, dim=1
@@ -379,6 +411,7 @@ def imagination_rollout(
     )  # (batch, horizon, action_dim)
     imagined_rewards = torch.stack(imagined_rewards, dim=1)  # (batch, horizon)
     imagined_terminals = torch.stack(imagined_terminals, dim=1)  # (batch, horizon)
+    imagined_continues = torch.stack(imagined_continues, dim=1)  # (batch, horizon)
     imagined_entropies = torch.stack(imagined_entropies, dim=1)  # (batch, horizon)
     imagined_log_probs = torch.stack(imagined_log_probs, dim=1)  # (batch, horizon)
 
@@ -388,22 +421,22 @@ def imagination_rollout(
         "actions": imagined_actions,
         "rewards": imagined_rewards,
         "terminals": imagined_terminals,
+        "continues": imagined_continues,
         "entropies": imagined_entropies,
         "log_probs": imagined_log_probs,
         "last_latent": latent,
     }
 
 
-def compute_lambda_returns(rewards, values, terminals, bootstrap, gamma=0.99, lam=0.95):
-    """Compute Dreamer-style lambda returns for imagined trajectories."""
+def compute_lambda_returns_from_continues(rewards, values, continues, bootstrap, lam=0.95):
+    """Compute Dreamer-style lambda returns from continuation factors."""
     _, horizon = rewards.shape
     returns = torch.zeros_like(rewards)
     next_return = bootstrap
-    continuation = 1.0 - terminals
 
     for t in reversed(range(horizon)):
         next_value = bootstrap if t == horizon - 1 else values[:, t + 1]
-        target = rewards[:, t] + gamma * continuation[:, t] * (
+        target = rewards[:, t] + continues[:, t] * (
             (1.0 - lam) * next_value + lam * next_return
         )
         returns[:, t] = target
@@ -412,15 +445,53 @@ def compute_lambda_returns(rewards, values, terminals, bootstrap, gamma=0.99, la
     return returns
 
 
-def compute_discount_weights(terminals, gamma):
-    _, horizon = terminals.shape
-    continuation = 1.0 - terminals.detach()
-    discount_weights = torch.ones_like(terminals)
+def compute_lambda_returns(rewards, values, terminals, bootstrap, gamma=0.99, lam=0.95):
+    """Compute lambda returns from terminal flags.
+
+    This wrapper is kept for callers that still represent continuation as
+    terminal probability. New Dreamer losses should prefer explicit continues.
+    """
+    continues = (1.0 - terminals) * gamma
+    return compute_lambda_returns_from_continues(
+        rewards, values, continues, bootstrap, lam=lam
+    )
+
+
+def compute_discount_weights_from_continues(continues):
+    _, horizon = continues.shape
+    discount_weights = torch.ones_like(continues)
     for t in range(1, horizon):
-        discount_weights[:, t] = (
-            discount_weights[:, t - 1] * gamma * continuation[:, t - 1]
-        )
+        discount_weights[:, t] = discount_weights[:, t - 1] * continues[:, t - 1]
     return discount_weights
+
+
+def compute_discount_weights(terminals, gamma):
+    continues = (1.0 - terminals.detach()) * gamma
+    return compute_discount_weights_from_continues(continues)
+
+
+def compute_replay_lambda_returns(rewards, values, terminals, bootstrap, config):
+    """Return targets for replay states using reward_{t+1}, not reward_t."""
+    if rewards.shape[1] < 2:
+        raise ValueError("Replay value loss needs at least two timesteps")
+
+    rewards_next = rewards[:, 1:]
+    terminals_next = terminals[:, 1:]
+    current_terminals = terminals[:, :-1]
+    values_for_loss = values[:, :-1]
+    continues_next = continuation_for_returns_from_done(terminals_next, config)
+    replay_returns = compute_lambda_returns_from_continues(
+        rewards=rewards_next,
+        values=values_for_loss,
+        continues=continues_next,
+        bootstrap=bootstrap.detach(),
+        lam=config.gae_lambda,
+    )
+    discount_weights = compute_discount_weights_from_continues(
+        continues_next.detach()
+    )
+    discount_weights = discount_weights * (1.0 - current_terminals.detach())
+    return replay_returns, discount_weights
 
 
 def compute_replay_value_loss(
@@ -432,22 +503,20 @@ def compute_replay_value_loss(
 
     with torch.no_grad():
         values = critic(latents).mean.squeeze(-1)
-        replay_returns = compute_lambda_returns(
-            rewards=rewards,
-            values=values,
-            terminals=terminals,
+        replay_returns, discount_weights = compute_replay_lambda_returns(
+            rewards,
+            values,
+            terminals,
             bootstrap=bootstrap.detach(),
-            gamma=config.gamma,
-            lam=config.gae_lambda,
+            config=config,
         )
-        discount_weights = compute_discount_weights(terminals, config.gamma)
 
-    value_dist = critic(latents)
+    value_dist = critic(latents[:, :-1])
     replay_return_loss = -(
         discount_weights * value_dist.log_prob(replay_returns.unsqueeze(-1))
     ).mean()
     with torch.no_grad():
-        ema_values = ema_critic(latents).mean
+        ema_values = ema_critic(latents[:, :-1]).mean
     replay_slow_loss = -(
         discount_weights * value_dist.log_prob(ema_values.detach())
     ).mean()
@@ -487,6 +556,9 @@ def compute_actor_critic_loss(
     )
     rewards = imagined_trajectories["rewards"]
     terminals = imagined_trajectories["terminals"]
+    continues = imagined_trajectories.get("continues")
+    if continues is None:
+        continues = continuation_for_returns_from_done(terminals, config)
     entropies = imagined_trajectories["entropies"]
     log_probs = imagined_trajectories["log_probs"]
     last_latent = imagined_trajectories["last_latent"]
@@ -496,12 +568,11 @@ def compute_actor_critic_loss(
     with torch.no_grad():
         current_values = critic(latents.detach()).mean.squeeze(-1)
         bootstrap = critic(last_latent.detach()).mean.squeeze(-1)
-        critic_returns = compute_lambda_returns(
+        critic_returns = compute_lambda_returns_from_continues(
             rewards=rewards.detach(),
             values=current_values,
-            terminals=terminals.detach(),
+            continues=continues.detach(),
             bootstrap=bootstrap,
-            gamma=config.gamma,
             lam=config.gae_lambda,
         )
         if return_normalizer is None:
@@ -520,7 +591,7 @@ def compute_actor_critic_loss(
         advantages = (critic_returns - current_values) / return_scale
 
     with torch.no_grad():
-        discount_weights = compute_discount_weights(terminals, config.gamma)
+        discount_weights = compute_discount_weights_from_continues(continues.detach())
 
     entropy = entropies.mean()
     actor_objective = (
@@ -1191,12 +1262,11 @@ class RSSM(nn.Module):
             step_action = action[:, t] * reset_mask
 
             # Compute h_t from z_{t-1} and a_{t-1}, then predict prior/posterior.
-            # a_{t-1} seems to be action[: t], by design
             recurrent_state = self.recurrent_step(
                 previous_stochastic, step_action, recurrent_state
             )
             prior_logits = self.prior_logits(recurrent_state)
-            posterior_logits = self.posterior_logits(recurrent_state, embed[:, t])  # But embed[: t] is o_t, by design
+            posterior_logits = self.posterior_logits(recurrent_state, embed[:, t])
             prior_dist = self._dist(prior_logits)
             posterior_dist = self._dist(posterior_logits)
             prior_dists.append(prior_dist)
