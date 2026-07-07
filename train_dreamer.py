@@ -223,7 +223,6 @@ def train_dreamer():
             avg_episode_length = sum(list_iterations_episode_length) / len(list_iterations_episode_length) if list_iterations_episode_length else 0
             avg_wm_loss = 0.0
             avg_reconstruction_loss = 0.0
-            avg_kl_loss = 0.0
             actor_loss = None
             critic_loss = None
             actor_loss_value = None
@@ -251,7 +250,6 @@ def train_dreamer():
 
                 total_wm_loss = 0
                 total_reconstruction_loss = 0
-                total_kl_loss = 0
                 total_reward_loss = 0
                 total_terminal_loss = 0
                 total_predicted_terminal = 0
@@ -305,7 +303,6 @@ def train_dreamer():
 
                     total_wm_loss += wm_loss.item()
                     total_reconstruction_loss += wm_metrics['world_model/reconstruction_loss']
-                    total_kl_loss += wm_metrics['world_model/kl_loss']
                     total_reward_loss += wm_metrics['world_model/reward_loss']
                     total_terminal_loss += wm_metrics['world_model/terminal_loss']
                     total_predicted_terminal += wm_metrics['world_model/predicted_terminal']
@@ -314,7 +311,6 @@ def train_dreamer():
 
                 avg_wm_loss = total_wm_loss / max(num_wm_updates, 1)
                 avg_reconstruction_loss = total_reconstruction_loss / max(num_wm_updates, 1)
-                avg_kl_loss = total_kl_loss / max(num_wm_updates, 1)
                 avg_reward_loss = total_reward_loss / max(num_wm_updates, 1)
                 avg_terminal_loss = total_terminal_loss / max(num_wm_updates, 1)
                 avg_predicted_terminal = total_predicted_terminal / max(num_wm_updates, 1)
@@ -457,7 +453,6 @@ def train_dreamer():
             #         'train/value_loss': critic_loss_value if critic_loss_value is not None else 0,
             #         'train/entropy': ac_metrics.get('actor_critic/entropy', 0),
             #         'train/learning_rate': actor_optimizer.param_groups[0]['lr'],
-            #         'train/kl_divergence': avg_kl_loss,
             #         'train/average_episode_length': avg_episode_length,
             #         'train/episodes_finished': episodes_finished,
             #         'train/explained_variance': ac_metrics.get('actor_critic/explained_variance', 0),
@@ -471,7 +466,6 @@ def train_dreamer():
             #         logger.info(
             #             "  WM Loss: "
             #             f"{avg_wm_loss:.4f} "
-            #             f"(Recon: {avg_reconstruction_loss:.4f}, KL: {avg_kl_loss:.4f}, "
             #             f"Reward: {avg_reward_loss:.4f}, Continue: {avg_terminal_loss:.4f})"
             #         )
             #         logger.info(
