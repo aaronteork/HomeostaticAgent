@@ -20,8 +20,6 @@ class PPOConfig(EnvConfig):
     clip_coef: float = 0.3
     ent_coef: float = 0.005
     vf_coef: float = 0.5
-    gamma: float = 0.99
-    gae_lambda: float = 0.95
     target_kl: float = 0.02
     image_latent_dim: int = 200
 

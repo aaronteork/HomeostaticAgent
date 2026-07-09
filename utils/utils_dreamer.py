@@ -502,7 +502,7 @@ def compute_replay_value_loss(
     terminals = replay_trajectories["terminals"].detach()
 
     with torch.no_grad():
-        values = critic(latents).mean.squeeze(-1)
+        values = ema_critic(latents).mean.squeeze(-1)
         replay_returns, discount_weights = compute_replay_lambda_returns(
             rewards,
             values,
@@ -566,8 +566,8 @@ def compute_actor_critic_loss(
     batch_size, horizon = rewards.shape
 
     with torch.no_grad():
-        current_values = critic(latents.detach()).mean.squeeze(-1)
-        bootstrap = critic(last_latent.detach()).mean.squeeze(-1)
+        current_values = ema_critic(latents.detach()).mean.squeeze(-1)
+        bootstrap = ema_critic(last_latent.detach()).mean.squeeze(-1)
         critic_returns = compute_lambda_returns_from_continues(
             rewards=rewards.detach(),
             values=current_values,
@@ -1211,7 +1211,7 @@ class RSSM(nn.Module):
         One entire step in the RSSM
 
         Args:
-            action: (batch, seq_len, action_dim) or (batch, action_dim)
+            action: (batch, seq_len, action_dim) or (batch, action_dim). This is previous action
             embed: (batch, seq_len, encoder_dim) or (batch, encoder_dim)
             is_first: (batch, seq_len) or (batch,)
             recurrent_state: (batch, recurrent_units) or None
@@ -1542,6 +1542,8 @@ class SequenceReplayBuffer:
         self.batch_length = config.batch_length
         self.batch_size = config.batch_size
         self._rng = np.random.default_rng()
+        self._total_rows_committed = 0
+        self._online_queue = deque()
 
         # Each item in the list is a time step of all environments, so the shape of each item is [num_workers, ...].
         # The deques ensure we only keep the most recent replay_capacity time steps per worker.
@@ -1597,6 +1599,11 @@ class SequenceReplayBuffer:
             self.episode_starts.append(self._pending_episode_starts)
             self.context_stochastics.append(self._pending_context_stochastics)
             self.context_recurrents.append(self._pending_context_recurrents)
+            self._total_rows_committed += 1
+            if self._total_rows_committed % self.batch_length == 0:
+                start_abs = self._total_rows_committed - self.batch_length
+                for env_idx in range(self.num_workers):
+                    self._online_queue.append((start_abs, env_idx))
 
             self._pending_observations = []
             self._pending_actions = []
@@ -1693,6 +1700,8 @@ class SequenceReplayBuffer:
         """Sample fixed-length same-worker sequences from the whole buffer."""
         time_len = len(self.observations)
         if (
+            batch_size <= 0
+            or
             len(self) < self.config.min_buffer_size_before_training
             or time_len < self.batch_length
         ):
@@ -1711,22 +1720,22 @@ class SequenceReplayBuffer:
         )
 
     def _sample_online(self, batch_size):
-        """Take newest non-overlapping chunks before falling back to uniform replay."""
+        """Pop fresh complete chunks once before falling back to uniform replay."""
         time_len = len(self.observations)
         if batch_size <= 0 or time_len < self.batch_length:
             return None
 
+        oldest_abs = self._total_rows_committed - time_len
+
         starts = []
         envs = []
-        for end_idx in range(time_len, self.batch_length - 1, -self.batch_length):
-            start_idx = end_idx - self.batch_length
-            for env_idx in range(self.num_workers):
-                starts.append(start_idx)
-                envs.append(env_idx)
-                if len(starts) == batch_size:
-                    return self._build_sequence_batch(
-                        starts, envs, force_first_reset=False
-                    )
+        while self._online_queue and len(starts) < batch_size:
+            start_abs, env_idx = self._online_queue.popleft()
+            start_idx = start_abs - oldest_abs
+            if start_idx < 0 or start_idx + self.batch_length > time_len:
+                continue
+            starts.append(start_idx)
+            envs.append(env_idx)
 
         if not starts:
             return None
@@ -1749,13 +1758,9 @@ class SequenceReplayBuffer:
 
     def sample_mixed(self):
         """Sample fresh online chunks first, then fill the batch with uniform replay."""
-        online_size = int(round(self.batch_size * self.config.online_batch_fraction))
-        online_size = max(0, min(self.batch_size, online_size))
-        replay_size = self.batch_size - online_size
-
-        online_batch = self._sample_online(online_size)
+        online_batch = self._sample_online(self.batch_size)
         online_count = len(online_batch["obs"]) if online_batch is not None else 0
-        replay_batch = self._sample_uniform(replay_size + (online_size - online_count))
+        replay_batch = self._sample_uniform(self.batch_size - online_count)
         return self._merge_batches([online_batch, replay_batch])
 
     def update_contexts(self, batch_data, latents):

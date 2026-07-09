@@ -135,7 +135,7 @@ def train_dreamer():
                 obs_tensor = obs_to_tensor_dict(obs, cfg)
                 obs_embed = world_model.encode(obs_tensor)
 
-                # Infer current latent state from the latest real observation.
+                # Get s_t (with z_t concatenated) and h_t from the world model
                 latent, recurrent_state, _, _ = world_model.observe(
                     prev_action,
                     obs_embed,
@@ -144,32 +144,12 @@ def train_dreamer():
                     previous_stochastic=previous_stochastic,
                     deterministic=False,
                 )
+                # I think previous stochastic here is already z_t
                 previous_stochastic, recurrent_state = world_model.rssm.split_feature(latent)
 
                 # Get action from actor
                 action, log_prob, dist = actor(latent, deterministic=False)
                 action = action.detach().cpu().numpy()
-
-                # If the current replay row is terminal, the next vector step is
-                # only used to advance SyncVectorEnv to the reset observation.
-                # Store a neutral dummy action for that terminal row; the
-                # following reset row will zero prev_action via is_first=True.
-                if np.any(replay_is_terminal):
-                    action[replay_is_terminal] = 0.5
-
-                # # TODO: Maybe delete this after debugging, but keep it for now to ensure that the actions are valid
-                # if global_step < cfg.seed_steps:
-                #     action = env.action_space.sample()
-                #     random_action_fraction = 1.0
-                # elif cfg.exploration_epsilon > 0.0:
-                #     random_mask = (
-                #         np.random.random(cfg.num_workers)
-                #         < cfg.exploration_epsilon
-                #     )
-                #     if np.any(random_mask):
-                #         random_actions = env.action_space.sample()
-                #         action[random_mask] = random_actions[random_mask]
-                #         random_action_fraction = float(np.mean(random_mask))
 
                 # Check for NaN
                 if np.any(np.isnan(action)) or np.any(np.isinf(action)):
@@ -180,6 +160,12 @@ def train_dreamer():
             # Dreamer convention: row t contains obs_t, action_t, and the
             # reward/done that led into obs_t from action_{t-1}. The replay
             # buffer reconstructs prev_action_t by shifting stored actions.
+            # Stores the following:
+            #   Current observation 
+            #   Action taken because of the current observation
+            #   The reward from the previous action that led to this state
+            #   If the current observation is done/terminal??  # XXX: Need to confirm this
+            #   The is_first flag for the current observation
             for i in range(cfg.num_workers):
                 obs_single = {
                     "vision": obs["vision"][i:i+1],
@@ -262,7 +248,6 @@ def train_dreamer():
             num_ac_updates = 0
             train_batches_due = 0
             wm_sample_failures = 0
-            ac_sample_failures = 0
             # last_actor_grad_norm = 0.0
             # avg_reward_loss = 0.0
             # avg_terminal_loss = 0.0
@@ -286,6 +271,9 @@ def train_dreamer():
                 total_target_terminal = 0
                 total_replay_terminal_count = 0.0
                 total_replay_terminal_items = 0
+                total_actor_loss = 0.0
+                total_critic_loss = 0.0
+                total_ac_metrics = {}
 
                 for wm_step in range(train_batches_due):
                     # Sample fresh online sequences first, then fill with uniform replay.
@@ -339,6 +327,80 @@ def train_dreamer():
                     total_target_terminal += wm_metrics['world_model/target_terminal']
                     num_wm_updates += 1
 
+                    # Train actor-critic from the same replay batch used for
+                    # this world-model update, matching DreamerV3's batch flow
+                    # and avoiding a second replay sample that would drain a
+                    # different online queue item.
+                    actor.train()
+                    critic.train()
+                    world_model.eval()
+                    set_requires_grad([world_model], False)
+
+                    ac_batch_size = batch_size
+                    ac_latents = wm_latents.detach()
+                    ac_rewards = rewards_batch.detach()
+                    ac_dones = dones_batch.detach()
+                    if ac_batch_size > cfg.imagine_batch_size:
+                        take = slice(0, cfg.imagine_batch_size)
+                        ac_batch_size = cfg.imagine_batch_size
+                        ac_latents = ac_latents[take]
+                        ac_rewards = ac_rewards[take]
+                        ac_dones = ac_dones[take]
+
+                    start_count = seq_len if cfg.imagine_last == 0 else min(cfg.imagine_last, seq_len)
+                    replay_latents = ac_latents[:, -start_count:].detach()
+                    replay_rewards = ac_rewards[:, -start_count:].detach()
+                    replay_terminals = ac_dones[:, -start_count:].detach()
+                    init_latent = replay_latents.reshape(ac_batch_size * start_count, -1)
+                    _, init_recurrent_state = world_model.rssm.split_feature(init_latent)
+
+                    imagined_trajectories = imagination_rollout(
+                        world_model.rssm,
+                        actor,
+                        world_model.reward_predictor,
+                        world_model.terminal_predictor,
+                        init_latent, init_recurrent_state, cfg
+                    )
+                    imagined_trajectories['start_batch_size'] = ac_batch_size
+                    imagined_trajectories['start_count'] = start_count
+                    replay_trajectories = {
+                        'latents': replay_latents,
+                        'rewards': replay_rewards,
+                        'terminals': replay_terminals,
+                    }
+
+                    actor_loss, critic_loss, ac_metrics = compute_actor_critic_loss(
+                        critic, ema_critic, imagined_trajectories, cfg, return_normalizer, replay_trajectories
+                    )
+
+                    actor_optimizer.zero_grad()
+                    actor_loss.backward()
+                    # last_actor_grad_norm = float(
+                    #     torch.nn.utils.clip_grad_norm_(
+                    #         actor.parameters(), cfg.actor_grad_norm_clip
+                    #     )
+                    # )
+                    actor_optimizer.step()
+                    # actor_scheduler.step()
+
+                    critic_optimizer.zero_grad()
+                    critic_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(critic.parameters(), cfg.critic_grad_norm_clip)
+                    critic_optimizer.step()
+                    # critic_scheduler.step()
+
+                    for param, ema_param in zip(critic.parameters(), ema_critic.parameters()):
+                        ema_param.data.copy_(cfg.ema_critic_tau * param.data + (1.0 - cfg.ema_critic_tau) * ema_param.data)
+
+                    set_requires_grad([world_model], True)
+                    world_model.train()
+
+                    total_actor_loss += actor_loss.item()
+                    total_critic_loss += critic_loss.item()
+                    for key, value in ac_metrics.items():
+                        total_ac_metrics[key] = total_ac_metrics.get(key, 0.0) + value
+                    num_ac_updates += 1
+
                 # avg_wm_loss = total_wm_loss / max(num_wm_updates, 1)
                 # avg_reconstruction_loss = total_reconstruction_loss / max(num_wm_updates, 1)
                 # avg_reward_loss = total_reward_loss / max(num_wm_updates, 1)
@@ -348,131 +410,16 @@ def train_dreamer():
                 # replay_terminal_count = total_replay_terminal_count
                 # replay_terminal_items = total_replay_terminal_items
 
-                # ===== PHASE 3: Imagination Rollout & Actor-Critic Training =====
-                if num_wm_updates > 0 and global_step >= cfg.seed_steps:
-                    logger.debug(f"Iteration {iteration}: Starting imagination rollout")
-                    actor.train()
-                    critic.train()
-                    world_model.eval()
-
-                    total_actor_loss = 0.0
-                    total_critic_loss = 0.0
-                    total_ac_metrics = {}
-
-                    set_requires_grad([world_model], False)
-                    for ac_step in range(num_wm_updates):
-                        batch_data = replay_buffer.sample()
-                        if batch_data is None:
-                            ac_sample_failures += 1
-                            break
-
-                        (
-                            batch_size,
-                            seq_len,
-                            obs_batch_flat,
-                            obs_target,
-                            actions_batch,
-                            prev_actions,
-                            rewards_batch,
-                            dones_batch,
-                            is_first_batch,
-                            initial_stochastic,
-                            initial_recurrent,
-                        ) = prepare_sequence_batch(batch_data, cfg)
-
-                        if batch_size > cfg.imagine_batch_size:
-                            take = slice(0, cfg.imagine_batch_size)
-                            batch_size = cfg.imagine_batch_size
-                            actions_batch = actions_batch[take]
-                            prev_actions = prev_actions[take]
-                            rewards_batch = rewards_batch[take]
-                            dones_batch = dones_batch[take]
-                            is_first_batch = is_first_batch[take]
-                            obs_target = {
-                                key: value[take]
-                                for key, value in obs_target.items()
-                            }
-                            # Flatten the batch size and sequence length but still keep the shape of the remaining data so that it is okay for CNN encoders
-                            obs_batch_flat = {
-                                key: value.view(-1, seq_len, *value.shape[1:])[take].reshape(
-                                    batch_size * seq_len, *value.shape[1:]
-                                )
-                                for key, value in obs_batch_flat.items()
-                            }
-
-                        with torch.no_grad():
-                            embed_batch = world_model.encode(obs_batch_flat).view(batch_size, seq_len, -1)
-                            posterior_latents, init_recurrent_state, _, _ = world_model.observe(
-                                prev_actions,
-                                embed_batch,
-                                is_first_batch,
-                                recurrent_state=initial_recurrent,
-                                previous_stochastic=initial_stochastic,
-                                deterministic=False,
-                            )
-                            start_count = seq_len if cfg.imagine_last == 0 else min(cfg.imagine_last, seq_len)
-                            replay_latents = posterior_latents[:, -start_count:].detach()
-                            replay_rewards = rewards_batch[:, -start_count:].detach()
-                            replay_terminals = dones_batch[:, -start_count:].detach()
-                            init_latent = replay_latents.reshape(batch_size * start_count, -1)
-                            _, init_recurrent_state = world_model.rssm.split_feature(init_latent)
-
-                        imagined_trajectories = imagination_rollout(
-                            world_model.rssm,
-                            actor,
-                            world_model.reward_predictor,
-                            world_model.terminal_predictor,
-                            init_latent, init_recurrent_state, cfg
-                        )
-                        imagined_trajectories['start_batch_size'] = batch_size
-                        imagined_trajectories['start_count'] = start_count
-                        replay_trajectories = {
-                            'latents': replay_latents,
-                            'rewards': replay_rewards,
-                            'terminals': replay_terminals,
-                        }
-
-                        actor_loss, critic_loss, ac_metrics = compute_actor_critic_loss(
-                            critic, ema_critic, imagined_trajectories, cfg, return_normalizer, replay_trajectories
-                        )
-
-                        actor_optimizer.zero_grad()
-                        actor_loss.backward()
-                        # last_actor_grad_norm = float(
-                        #     torch.nn.utils.clip_grad_norm_(
-                        #         actor.parameters(), cfg.actor_grad_norm_clip
-                        #     )
-                        # )
-                        actor_optimizer.step()
-                        # actor_scheduler.step()
-
-                        critic_optimizer.zero_grad()
-                        critic_loss.backward()
-                        torch.nn.utils.clip_grad_norm_(critic.parameters(), cfg.critic_grad_norm_clip)
-                        critic_optimizer.step()
-                        # critic_scheduler.step()
-
-                        for param, ema_param in zip(critic.parameters(), ema_critic.parameters()):
-                            ema_param.data.copy_(cfg.ema_critic_tau * param.data + (1.0 - cfg.ema_critic_tau) * ema_param.data)
-
-                        total_actor_loss += actor_loss.item()
-                        total_critic_loss += critic_loss.item()
-                        for key, value in ac_metrics.items():
-                            total_ac_metrics[key] = total_ac_metrics.get(key, 0.0) + value
-                        num_ac_updates += 1
-
-                    set_requires_grad([world_model], True)
-
-                    if num_ac_updates > 0:
-                        # actor_loss_value = total_actor_loss / num_ac_updates
-                        # critic_loss_value = total_critic_loss / num_ac_updates
-                        ac_metrics = {
-                            key: value / num_ac_updates
-                            for key, value in total_ac_metrics.items()
-                        }
-                    # else:
-                    #     actor_loss_value = None
-                    #     critic_loss_value = None
+                if num_ac_updates > 0:
+                    # actor_loss_value = total_actor_loss / num_ac_updates
+                    # critic_loss_value = total_critic_loss / num_ac_updates
+                    ac_metrics = {
+                        key: value / num_ac_updates
+                        for key, value in total_ac_metrics.items()
+                    }
+                # else:
+                #     actor_loss_value = None
+                #     critic_loss_value = None
 
                 # Log only the same high-level training metrics as train_ppo.py so
                 # Dreamer and PPO runs are directly comparable in MLflow.
@@ -501,7 +448,7 @@ def train_dreamer():
             #         logger.info(
             #             "  Diagnostics: "
             #             f"WMUpdates={num_wm_updates}/{train_batches_due}, ACUpdates={num_ac_updates}, "
-            #             f"WMSampleFails={wm_sample_failures}, ACSampleFails={ac_sample_failures}, "
+            #             f"WMSampleFails={wm_sample_failures}, "
             #             f"ReplayTerminals={replay_terminal_count:.0f}/{replay_terminal_items} "
             #             f"({replay_terminal_count / max(replay_terminal_items, 1):.6f}), "
             #             f"ActorGradNorm={last_actor_grad_norm:.4f}, "
