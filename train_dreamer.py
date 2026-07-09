@@ -375,11 +375,9 @@ def train_dreamer():
 
                     actor_optimizer.zero_grad()
                     actor_loss.backward()
-                    # last_actor_grad_norm = float(
-                    #     torch.nn.utils.clip_grad_norm_(
-                    #         actor.parameters(), cfg.actor_grad_norm_clip
-                    #     )
-                    # )
+                    torch.nn.utils.clip_grad_norm_(
+                            actor.parameters(), cfg.actor_grad_norm_clip
+                        )
                     actor_optimizer.step()
                     # actor_scheduler.step()
 
