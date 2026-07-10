@@ -298,22 +298,22 @@ def compute_world_model_loss(
     )
 
     metrics = {
-        "world_model/reconstruction_loss": recon_loss.item(),
-        "world_model/reconstruction_vision_loss": recon_losses["vision"].item(),
-        "world_model/reconstruction_proprioception_loss": recon_losses[
-            "proprioception"
-        ].item(),
-        "world_model/reconstruction_internal_state_loss": recon_losses[
-            "internal_state"
-        ].item(),
-        "world_model/dyn_loss": dyn_loss.item(),
-        "world_model/rep_loss": rep_loss.item(),
-        "world_model/reward_loss": reward_loss.item(),
-        "world_model/terminal_loss": terminal_loss.item(),
-        "world_model/predicted_continue": predicted_continue.mean().item(),
-        "world_model/predicted_terminal": predicted_terminal.mean().item(),
-        "world_model/target_terminal": done_target.mean().item(),
-        "world_model/total_loss": loss.item(),
+        # "world_model/reconstruction_loss": recon_loss.item(),
+        # "world_model/reconstruction_vision_loss": recon_losses["vision"].item(),
+        # "world_model/reconstruction_proprioception_loss": recon_losses[
+        #     "proprioception"
+        # ].item(),
+        # "world_model/reconstruction_internal_state_loss": recon_losses[
+        #     "internal_state"
+        # ].item(),
+        # "world_model/dyn_loss": dyn_loss.item(),
+        # "world_model/rep_loss": rep_loss.item(),
+        # "world_model/reward_loss": reward_loss.item(),
+        # "world_model/terminal_loss": terminal_loss.item(),
+        # "world_model/predicted_continue": predicted_continue.mean().item(),
+        # "world_model/predicted_terminal": predicted_terminal.mean().item(),
+        # "world_model/target_terminal": done_target.mean().item(),
+        # "world_model/total_loss": loss.item(),
     }
     if "heat_sensor" in recon_losses:
         metrics["world_model/reconstruction_heat_sensor_loss"] = recon_losses[
@@ -644,23 +644,23 @@ def compute_actor_critic_loss(
         critic_loss = critic_loss + config.critic_replay_loss * replay_loss
 
     metrics = {
-        "actor_critic/actor_loss": actor_loss.item(),
-        "actor_critic/critic_loss": critic_loss.item(),
-        "actor_critic/critic_return_loss": critic_return_loss.item(),
-        "actor_critic/critic_slow_loss": critic_slow_loss.item(),
-        "actor_critic/critic_imagined_loss": critic_imagined_loss.item(),
-        "actor_critic/critic_replay_loss": replay_loss.item(),
-        "actor_critic/critic_replay_return_loss": replay_return_loss.item(),
-        "actor_critic/critic_replay_slow_loss": replay_slow_loss.item(),
-        "actor_critic/entropy": entropy.item(),
-        "actor_critic/actor_objective": actor_objective.item(),
-        "actor_critic/average_return": critic_returns.mean().item(),
-        "actor_critic/return_norm_offset": return_offset.item(),
-        "actor_critic/return_norm_scale": return_scale.item(),
-        "actor_critic/average_advantage": advantages.mean().item(),
-        "actor_critic/advantage_std": advantages.std().item(),
-        "actor_critic/log_prob": log_probs.mean().item(),
-        "actor_critic/explained_variance": explained_variance,
+        # "actor_critic/actor_loss": actor_loss.item(),
+        # "actor_critic/critic_loss": critic_loss.item(),
+        # "actor_critic/critic_return_loss": critic_return_loss.item(),
+        # "actor_critic/critic_slow_loss": critic_slow_loss.item(),
+        # "actor_critic/critic_imagined_loss": critic_imagined_loss.item(),
+        # "actor_critic/critic_replay_loss": replay_loss.item(),
+        # "actor_critic/critic_replay_return_loss": replay_return_loss.item(),
+        # "actor_critic/critic_replay_slow_loss": replay_slow_loss.item(),
+        # "actor_critic/entropy": entropy.item(),
+        # "actor_critic/actor_objective": actor_objective.item(),
+        # "actor_critic/average_return": critic_returns.mean().item(),
+        # "actor_critic/return_norm_offset": return_offset.item(),
+        # "actor_critic/return_norm_scale": return_scale.item(),
+        # "actor_critic/average_advantage": advantages.mean().item(),
+        # "actor_critic/advantage_std": advantages.std().item(),
+        # "actor_critic/log_prob": log_probs.mean().item(),
+        # "actor_critic/explained_variance": explained_variance,
     }
     if replay_returns is not None:
         metrics["actor_critic/replay_return"] = replay_returns.mean().item()

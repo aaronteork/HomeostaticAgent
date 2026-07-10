@@ -264,11 +264,11 @@ def train_dreamer():
                 world_model.train()
 
                 total_wm_loss = 0
-                total_reconstruction_loss = 0
-                total_reward_loss = 0
-                total_terminal_loss = 0
-                total_predicted_terminal = 0
-                total_target_terminal = 0
+                # total_reconstruction_loss = 0
+                # total_reward_loss = 0
+                # total_terminal_loss = 0
+                # total_predicted_terminal = 0
+                # total_target_terminal = 0
                 total_replay_terminal_count = 0.0
                 total_replay_terminal_items = 0
                 total_actor_loss = 0.0
@@ -320,11 +320,11 @@ def train_dreamer():
                     replay_buffer.update_contexts(batch_data, wm_latents.detach())
 
                     total_wm_loss += wm_loss.item()
-                    total_reconstruction_loss += wm_metrics['world_model/reconstruction_loss']
-                    total_reward_loss += wm_metrics['world_model/reward_loss']
-                    total_terminal_loss += wm_metrics['world_model/terminal_loss']
-                    total_predicted_terminal += wm_metrics['world_model/predicted_terminal']
-                    total_target_terminal += wm_metrics['world_model/target_terminal']
+                    # total_reconstruction_loss += wm_metrics['world_model/reconstruction_loss']
+                    # total_reward_loss += wm_metrics['world_model/reward_loss']
+                    # total_terminal_loss += wm_metrics['world_model/terminal_loss']
+                    # total_predicted_terminal += wm_metrics['world_model/predicted_terminal']
+                    # total_target_terminal += wm_metrics['world_model/target_terminal']
                     num_wm_updates += 1
 
                     # Train actor-critic from the same replay batch used for
@@ -399,15 +399,6 @@ def train_dreamer():
                         total_ac_metrics[key] = total_ac_metrics.get(key, 0.0) + value
                     num_ac_updates += 1
 
-                # avg_wm_loss = total_wm_loss / max(num_wm_updates, 1)
-                # avg_reconstruction_loss = total_reconstruction_loss / max(num_wm_updates, 1)
-                # avg_reward_loss = total_reward_loss / max(num_wm_updates, 1)
-                # avg_terminal_loss = total_terminal_loss / max(num_wm_updates, 1)
-                # avg_predicted_terminal = total_predicted_terminal / max(num_wm_updates, 1)
-                # avg_target_terminal = total_target_terminal / max(num_wm_updates, 1)
-                # replay_terminal_count = total_replay_terminal_count
-                # replay_terminal_items = total_replay_terminal_items
-
                 if num_ac_updates > 0:
                     # actor_loss_value = total_actor_loss / num_ac_updates
                     # critic_loss_value = total_critic_loss / num_ac_updates
@@ -415,45 +406,6 @@ def train_dreamer():
                         key: value / num_ac_updates
                         for key, value in total_ac_metrics.items()
                     }
-                # else:
-                #     actor_loss_value = None
-                #     critic_loss_value = None
-
-                # Log only the same high-level training metrics as train_ppo.py so
-                # Dreamer and PPO runs are directly comparable in MLflow.
-            # if iteration % 10 == 0:
-            #     metrics_to_log = {
-            #         'global_step': global_step,
-            #         'train/policy_loss': actor_loss_value if actor_loss_value is not None else 0,
-            #         'train/value_loss': critic_loss_value if critic_loss_value is not None else 0,
-            #         'train/entropy': ac_metrics.get('actor_critic/entropy', 0),
-            #         'train/learning_rate': actor_optimizer.param_groups[0]['lr'],
-            #         'train/average_episode_length': avg_episode_length,
-            #         'train/episodes_finished': episodes_finished,
-            #         'train/explained_variance': ac_metrics.get('actor_critic/explained_variance', 0),
-            #     }
-
-            #     mlflow.log_metrics(metrics_to_log, step=iteration)
-
-            #     logger.info(f"Iteration {iteration}: Steps={global_step}/{cfg.total_env_steps}, Buffer size={len(replay_buffer)}, Episodes finished={episodes_finished}")
-            #     logger.info(f"  Reward: {np.mean(rewards):.4f}, ActionDistFromCenter: {mean_action_distance_from_center:.4f}, RandomFrac: {random_action_fraction:.2f}")
-            #     if len(replay_buffer) >= cfg.min_buffer_size_before_training:
-            #         logger.info(
-            #             "  WM Loss: "
-            #             f"{avg_wm_loss:.4f} "
-            #             f"Reward: {avg_reward_loss:.4f}, Continue: {avg_terminal_loss:.4f})"
-            #         )
-            #         logger.info(
-            #             "  Diagnostics: "
-            #             f"WMUpdates={num_wm_updates}/{train_batches_due}, ACUpdates={num_ac_updates}, "
-            #             f"WMSampleFails={wm_sample_failures}, "
-            #             f"ReplayTerminals={replay_terminal_count:.0f}/{replay_terminal_items} "
-            #             f"({replay_terminal_count / max(replay_terminal_items, 1):.6f}), "
-            #             f"ActorGradNorm={last_actor_grad_norm:.4f}, "
-            #             f"PredTerminal={avg_predicted_terminal:.4f}, TargetTerminal={avg_target_terminal:.4f}"
-            #         )
-            #         if actor_loss_value is not None:
-            #             logger.info(f"  Actor Loss: {actor_loss_value:.4f}, Critic Loss: {critic_loss_value:.4f}")
             iteration += 1
 
     # Save models
