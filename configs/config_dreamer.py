@@ -14,7 +14,7 @@ class DreamerConfig(EnvConfig):
     rssm_unimix: float = 0.01
     free_nats: float = 1.0
     batch_size: int = 16
-    batch_length: int = 64
+    batch_length: int = 256
     total_env_steps: int = 2_000_000
     replay_ratio: int = 128   # Was originally 512 to follow the paper for visual control but reduced to speed things up
     # total_updates: int = 1_000
@@ -47,7 +47,7 @@ class DreamerConfig(EnvConfig):
     imagine_batch_size: int = 16
     # world_model_grad_steps_per_update: int = 1
     world_model_lr: float = 1e-4
-    ent_coef: float = 3e-4
+    ent_coef: float = 0.005
     return_norm_rate: float = 0.01
     return_norm_limit: float = 1.0
     return_norm_percentile_low: float = 5.0
