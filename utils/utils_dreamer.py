@@ -644,15 +644,15 @@ def compute_actor_critic_loss(
         critic_loss = critic_loss + config.critic_replay_loss * replay_loss
 
     metrics = {
-        # "actor_critic/actor_loss": actor_loss.item(),
-        # "actor_critic/critic_loss": critic_loss.item(),
+        "actor_critic/actor_loss": actor_loss.item(),
+        "actor_critic/critic_loss": critic_loss.item(),
         # "actor_critic/critic_return_loss": critic_return_loss.item(),
         # "actor_critic/critic_slow_loss": critic_slow_loss.item(),
         # "actor_critic/critic_imagined_loss": critic_imagined_loss.item(),
         # "actor_critic/critic_replay_loss": replay_loss.item(),
         # "actor_critic/critic_replay_return_loss": replay_return_loss.item(),
         # "actor_critic/critic_replay_slow_loss": replay_slow_loss.item(),
-        # "actor_critic/entropy": entropy.item(),
+        "actor_critic/entropy": entropy.item(),
         # "actor_critic/actor_objective": actor_objective.item(),
         # "actor_critic/average_return": critic_returns.mean().item(),
         # "actor_critic/return_norm_offset": return_offset.item(),
@@ -660,7 +660,7 @@ def compute_actor_critic_loss(
         # "actor_critic/average_advantage": advantages.mean().item(),
         # "actor_critic/advantage_std": advantages.std().item(),
         # "actor_critic/log_prob": log_probs.mean().item(),
-        # "actor_critic/explained_variance": explained_variance,
+        "actor_critic/explained_variance": explained_variance,
     }
     if replay_returns is not None:
         metrics["actor_critic/replay_return"] = replay_returns.mean().item()

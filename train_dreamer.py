@@ -241,8 +241,8 @@ def train_dreamer():
             # avg_reconstruction_loss = 0.0
             actor_loss = None
             critic_loss = None
-            # actor_loss_value = None
-            # critic_loss_value = None
+            actor_loss_value = None
+            critic_loss_value = None
             ac_metrics = {}
             num_wm_updates = 0
             num_ac_updates = 0
@@ -400,12 +400,36 @@ def train_dreamer():
                     num_ac_updates += 1
 
                 if num_ac_updates > 0:
-                    # actor_loss_value = total_actor_loss / num_ac_updates
-                    # critic_loss_value = total_critic_loss / num_ac_updates
+                    actor_loss_value = total_actor_loss / num_ac_updates
+                    critic_loss_value = total_critic_loss / num_ac_updates
                     ac_metrics = {
                         key: value / num_ac_updates
                         for key, value in total_ac_metrics.items()
                     }
+            avg_episode_length = (
+                sum(list_iterations_episode_length) / len(list_iterations_episode_length)
+                if list_iterations_episode_length
+                else 0.0
+            )
+            train_metrics = {
+                "global_step": global_step,
+                "train/average_episode_length": avg_episode_length,
+                "train/episodes_finished": episodes_finished,
+            }
+            if actor_loss_value is not None and critic_loss_value is not None:
+                train_metrics.update(
+                    {
+                        "train/policy_loss": actor_loss_value,
+                        "train/value_loss": critic_loss_value,
+                        "train/entropy": ac_metrics.get("actor_critic/entropy", 0.0),
+                        "train/learning_rate": actor_optimizer.param_groups[0]["lr"],
+                        "train/kl_divergence": 0.0,
+                        "train/explained_variance": ac_metrics.get(
+                            "actor_critic/explained_variance", 0.0
+                        ),
+                    }
+                )
+            mlflow.log_metrics(train_metrics, step=global_step)
             iteration += 1
 
     # Save models
