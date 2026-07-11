@@ -10,7 +10,7 @@ class PPOConfig(EnvConfig):
     batch_size: int = field(init=False)
     frame_stack_size: int = 3
     frame_stack_key: str = "vision"
-    gamma: float = 0.99
+    gamma: float = 0.997
     gae_lambda: float = 0.95
     epochs: int = 30
     lr_start: float = 1e-4
