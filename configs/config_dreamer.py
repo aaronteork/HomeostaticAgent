@@ -26,7 +26,7 @@ class DreamerConfig(EnvConfig):
     # Replay buffer parameters
     # replay_scaling: int = 64
     replay_capacity: int = 500_000  # paper is originally 5e6
-    min_buffer_size_before_training: int | None = None
+    min_buffer_size_before_training: int | None = 50_000
 
     # World model loss
     world_model_grad_norm_clip: float = 1000.0

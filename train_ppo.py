@@ -28,7 +28,7 @@ def train_ppo():
     logger.info("Starting PPO training...")
 
     # Create mlflow
-    mlflow.set_tracking_uri("sqlite:///runs.db")
+    mlflow.set_tracking_uri("sqlite:///runs.db?timeout=500")
     mlflow.set_experiment("HomoeostaticAgent")
 
     # Get config
