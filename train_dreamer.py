@@ -250,9 +250,7 @@ def train_dreamer():
             wm_sample_failures = 0
             # last_actor_grad_norm = 0.0
             # avg_reward_loss = 0.0
-            # avg_terminal_loss = 0.0
-            # avg_predicted_terminal = 0.0
-            # avg_target_terminal = 0.0
+            # avg_continue_loss = 0.0
             # replay_terminal_count = 0.0
             # replay_terminal_items = 0
             if len(replay_buffer) >= cfg.min_buffer_size_before_training:
@@ -266,9 +264,7 @@ def train_dreamer():
                 total_wm_loss = 0
                 # total_reconstruction_loss = 0
                 # total_reward_loss = 0
-                # total_terminal_loss = 0
-                # total_predicted_terminal = 0
-                # total_target_terminal = 0
+                # total_continue_loss = 0
                 total_replay_terminal_count = 0.0
                 total_replay_terminal_items = 0
                 total_actor_loss = 0.0
@@ -304,7 +300,7 @@ def train_dreamer():
                         world_model.rssm,
                         world_model.decoder,
                         world_model.reward_predictor,
-                        world_model.terminal_predictor,
+                        world_model.continue_predictor,
                         prev_actions, actions_batch, embed_batch, obs_target, is_first_batch,
                         rewards_batch, dones_batch, cfg,
                         initial_stochastic=initial_stochastic,
@@ -312,19 +308,17 @@ def train_dreamer():
                         return_latents=True,
                     )
 
+                    # Backprop the world-model loss now, but delay the
+                    # optimizer step until actor-critic has used the same
+                    # pre-update posterior states for imagination.
                     world_model_optimizer.zero_grad()
                     wm_loss.backward()
                     torch.nn.utils.clip_grad_norm_(world_model_params, cfg.world_model_grad_norm_clip)
-                    world_model_optimizer.step()
-                    # world_model_scheduler.step()
-                    replay_buffer.update_contexts(batch_data, wm_latents.detach())
 
                     total_wm_loss += wm_loss.item()
                     # total_reconstruction_loss += wm_metrics['world_model/reconstruction_loss']
                     # total_reward_loss += wm_metrics['world_model/reward_loss']
-                    # total_terminal_loss += wm_metrics['world_model/terminal_loss']
-                    # total_predicted_terminal += wm_metrics['world_model/predicted_terminal']
-                    # total_target_terminal += wm_metrics['world_model/target_terminal']
+                    # total_continue_loss += wm_metrics['world_model/continue_loss']
                     num_wm_updates += 1
 
                     # Train actor-critic from the same replay batch used for
@@ -333,8 +327,6 @@ def train_dreamer():
                     # different online queue item.
                     actor.train()
                     critic.train()
-                    world_model.eval()
-                    set_requires_grad([world_model], False)
 
                     ac_batch_size = batch_size
                     ac_latents = wm_latents.detach()
@@ -358,7 +350,7 @@ def train_dreamer():
                         world_model.rssm,
                         actor,
                         world_model.reward_predictor,
-                        world_model.terminal_predictor,
+                        world_model.continue_predictor,
                         init_latent, init_recurrent_state, cfg
                     )
                     imagined_trajectories['start_batch_size'] = ac_batch_size
@@ -378,20 +370,22 @@ def train_dreamer():
                     torch.nn.utils.clip_grad_norm_(
                             actor.parameters(), cfg.actor_grad_norm_clip
                         )
-                    actor_optimizer.step()
-                    # actor_scheduler.step()
 
                     critic_optimizer.zero_grad()
                     critic_loss.backward()
                     torch.nn.utils.clip_grad_norm_(critic.parameters(), cfg.critic_grad_norm_clip)
-                    critic_optimizer.step()
                     # critic_scheduler.step()
+
+                    world_model_optimizer.step()
+                    # world_model_scheduler.step()
+                    actor_optimizer.step()
+                    # actor_scheduler.step()
+                    critic_optimizer.step()
+
+                    replay_buffer.update_contexts(batch_data, wm_latents.detach())
 
                     for param, ema_param in zip(critic.parameters(), ema_critic.parameters()):
                         ema_param.data.copy_(cfg.ema_critic_tau * param.data + (1.0 - cfg.ema_critic_tau) * ema_param.data)
-
-                    set_requires_grad([world_model], True)
-                    world_model.train()
 
                     total_actor_loss += actor_loss.item()
                     total_critic_loss += critic_loss.item()

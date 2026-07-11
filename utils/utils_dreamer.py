@@ -48,43 +48,6 @@ def set_requires_grad(modules, requires_grad):
             param.requires_grad_(requires_grad)
 
 
-def continuation_training_target(done: Tensor, config: DreamerConfig) -> Tensor:
-    """Target for the continue head.
-
-    With DreamerV3's contdisc convention, the continue head predicts discounted
-    continuation directly. Otherwise, it predicts pure p(not terminal).
-    """
-    continue_target = 1.0 - done.float()
-    if config.contdisc:
-        continue_target = continue_target * config.discount
-    return continue_target
-
-
-def continuation_for_returns_from_done(done: Tensor, config: DreamerConfig) -> Tensor:
-    """Convert replay terminal flags to the continuation used by lambda returns."""
-    return (1.0 - done.float()) * config.discount
-
-
-def continuation_for_returns_from_prediction(
-    predicted_continue: Tensor, config: DreamerConfig
-) -> Tensor:
-    """Convert continue-head output to lambda-return continuation."""
-    if config.contdisc:
-        return predicted_continue
-    return predicted_continue * config.gamma
-
-
-def terminal_probability_from_continue(
-    predicted_continue: Tensor, config: DreamerConfig
-) -> Tensor:
-    """Diagnostic terminal probability from continue-head output."""
-    if config.contdisc:
-        continue_prob = (predicted_continue / config.discount).clamp(0.0, 1.0)
-    else:
-        continue_prob = predicted_continue
-    return 1.0 - continue_prob
-
-
 # ------------------ Data and replay preparation ------------------------
 def stack_sequence_observations(obs_sequences, cfg):
     keys = ["vision", "proprioception", "internal_state"]
@@ -182,7 +145,7 @@ def compute_world_model_loss(
     rssm,
     decoder,
     reward_predictor,
-    terminal_predictor,
+    continue_predictor,
     prev_action,
     action,
     embed,
@@ -196,13 +159,13 @@ def compute_world_model_loss(
     return_latents=False,
 ):
     """
-    Compute complete world model loss: reconstruction + KL + reward + terminal.
+    Compute complete world model loss: reconstruction + KL + reward + continue.
 
     Args:
         rssm: RSSM model
         decoder: CNN decoder
         reward_predictor: Reward prediction network
-        terminal_predictor: Terminal prediction network
+        continue_predictor: Continue prediction network
         prev_action: (batch, seq_len, action_dim)
         action: (batch, seq_len, action_dim)
         embed: (batch, seq_len, encoder_dim)
@@ -235,7 +198,7 @@ def compute_world_model_loss(
     # This is a simpler way of doing compared to SheepRL's implementation which has a MSEDistribution
     reconstructed_obs = decoder(latent)
     recon_losses = {
-        key: F.l1_loss(reconstructed_obs[key], obs[key])
+        key: F.mse_loss(reconstructed_obs[key], obs[key])
         if key == "vision"
         else F.mse_loss(symlog(reconstructed_obs[key]), symlog(obs[key]))
         for key in reconstructed_obs.keys()
@@ -282,17 +245,17 @@ def compute_world_model_loss(
     # ===== Continue Prediction Loss =====
     # DreamerV3 predicts continuation, and with contdisc enabled it predicts the
     # discounted continuation used directly in lambda returns.
-    predicted_continue = terminal_predictor(latent)  # (batch, seq_len, 1)
+    predicted_continue = continue_predictor(latent)  # (batch, seq_len, 1)
     done_target = done.contiguous().view(batch_size, seq_len, 1).float()
-    continue_target = continuation_training_target(done_target, config)
-    terminal_loss = F.binary_cross_entropy(predicted_continue, continue_target)
-    predicted_terminal = terminal_probability_from_continue(predicted_continue, config)
-
+    continue_target = 1.0 - done_target
+    if config.contdisc:
+        continue_target = continue_target * config.discount
+    continue_loss = F.binary_cross_entropy(predicted_continue, continue_target)
     # ===== Combined Loss with Weighting =====
     loss = (
         recon_loss
         + config.reward_weight * reward_loss
-        + config.terminal_weight * terminal_loss
+        + config.continue_weight * continue_loss
         + config.dyn_loss_weight * dyn_loss
         + config.rep_loss_weight * rep_loss
     )
@@ -309,10 +272,8 @@ def compute_world_model_loss(
         # "world_model/dyn_loss": dyn_loss.item(),
         # "world_model/rep_loss": rep_loss.item(),
         # "world_model/reward_loss": reward_loss.item(),
-        # "world_model/terminal_loss": terminal_loss.item(),
+        # "world_model/continue_loss": continue_loss.item(),
         # "world_model/predicted_continue": predicted_continue.mean().item(),
-        # "world_model/predicted_terminal": predicted_terminal.mean().item(),
-        # "world_model/target_terminal": done_target.mean().item(),
         # "world_model/total_loss": loss.item(),
     }
     if "heat_sensor" in recon_losses:
@@ -329,7 +290,7 @@ def imagination_rollout(
     rssm,
     actor,
     reward_predictor,
-    terminal_predictor,
+    continue_predictor,
     init_latent,
     init_recurrent_state,
     config: DreamerConfig,
@@ -346,14 +307,14 @@ def imagination_rollout(
         rssm: RSSM model
         actor: Actor network
         reward_predictor: Reward predictor network
-        terminal_predictor: Terminal predictor network
+        continue_predictor: Continue predictor network
         init_latent: (batch, latent_dim) - posterior latent from real obs
         init_recurrent_state: (batch, gru_units)
         config: DreamerConfig
 
     Returns:
-        imagined_trajectories: dict with latents, actions, rewards, terminals,
-        entropies, and final latent.
+        imagined_trajectories: dict with a single latent state sequence,
+        actions, rewards, continues, entropies, and log-probs.
     """
     horizon = config.imagine_horizon
 
@@ -361,17 +322,14 @@ def imagination_rollout(
     latent = init_latent.detach()
     recurrent_state = init_recurrent_state.detach()
 
-    imagined_latents = []
-    imagined_actor_latents = []
+    imagined_latents = [latent]
     imagined_actions = []
     imagined_rewards = []
-    imagined_terminals = []
     imagined_continues = []
     imagined_entropies = []
     imagined_log_probs = []
 
     for step in range(horizon):
-        imagined_actor_latents.append(latent)
         action, _, dist = actor(latent.detach(), deterministic=False)
         imagined_actions.append(action)
         imagined_log_probs.append(dist.log_prob(action.detach()).sum(dim=-1))
@@ -388,43 +346,33 @@ def imagination_rollout(
             imagined_latents.append(latent)
             reward_dist = reward_predictor(latent)
             imagined_rewards.append(reward_dist.mean.squeeze(-1))
-            continue_prob = terminal_predictor(latent)
+            continue_head_output = continue_predictor(latent)
+            if config.contdisc:
+                continue_factor = continue_head_output
+            else:
+                continue_factor = continue_head_output * config.gamma
             imagined_continues.append(
-                continuation_for_returns_from_prediction(
-                    continue_prob, config
-                ).squeeze(-1)
-            )
-            imagined_terminals.append(
-                terminal_probability_from_continue(
-                    continue_prob, config
-                ).squeeze(-1)
+                continue_factor.squeeze(-1)
             )
 
     imagined_latents = torch.stack(
         imagined_latents, dim=1
-    )  # (batch, horizon, latent_dim)
-    imagined_actor_latents = torch.stack(
-        imagined_actor_latents, dim=1
-    )  # (batch, horizon, latent_dim), states that produced each action
+    )  # (batch, horizon + 1, latent_dim), s_0 ... s_H
     imagined_actions = torch.stack(
         imagined_actions, dim=1
     )  # (batch, horizon, action_dim)
     imagined_rewards = torch.stack(imagined_rewards, dim=1)  # (batch, horizon)
-    imagined_terminals = torch.stack(imagined_terminals, dim=1)  # (batch, horizon)
     imagined_continues = torch.stack(imagined_continues, dim=1)  # (batch, horizon)
     imagined_entropies = torch.stack(imagined_entropies, dim=1)  # (batch, horizon)
     imagined_log_probs = torch.stack(imagined_log_probs, dim=1)  # (batch, horizon)
 
     return {
         "latents": imagined_latents,
-        "actor_latents": imagined_actor_latents,
         "actions": imagined_actions,
         "rewards": imagined_rewards,
-        "terminals": imagined_terminals,
         "continues": imagined_continues,
         "entropies": imagined_entropies,
         "log_probs": imagined_log_probs,
-        "last_latent": latent,
     }
 
 
@@ -445,29 +393,12 @@ def compute_lambda_returns_from_continues(rewards, values, continues, bootstrap,
     return returns
 
 
-def compute_lambda_returns(rewards, values, terminals, bootstrap, gamma=0.99, lam=0.95):
-    """Compute lambda returns from terminal flags.
-
-    This wrapper is kept for callers that still represent continuation as
-    terminal probability. New Dreamer losses should prefer explicit continues.
-    """
-    continues = (1.0 - terminals) * gamma
-    return compute_lambda_returns_from_continues(
-        rewards, values, continues, bootstrap, lam=lam
-    )
-
-
 def compute_discount_weights_from_continues(continues):
     _, horizon = continues.shape
     discount_weights = torch.ones_like(continues)
     for t in range(1, horizon):
         discount_weights[:, t] = discount_weights[:, t - 1] * continues[:, t - 1]
     return discount_weights
-
-
-def compute_discount_weights(terminals, gamma):
-    continues = (1.0 - terminals.detach()) * gamma
-    return compute_discount_weights_from_continues(continues)
 
 
 def compute_replay_lambda_returns(rewards, values, terminals, bootstrap, config):
@@ -479,7 +410,7 @@ def compute_replay_lambda_returns(rewards, values, terminals, bootstrap, config)
     terminals_next = terminals[:, 1:]
     current_terminals = terminals[:, :-1]
     values_for_loss = values[:, :-1]
-    continues_next = continuation_for_returns_from_done(terminals_next, config)
+    continues_next = (1.0 - terminals_next.float()) * config.discount
     replay_returns = compute_lambda_returns_from_continues(
         rewards=rewards_next,
         values=values_for_loss,
@@ -548,22 +479,22 @@ def compute_actor_critic_loss(
         critic_loss: scalar
         metrics: dict with loss components
     """
-    # `latents` are the post-action states used to predict rewards and terminals.
-    # Policy log-probs were produced from the pre-action states, so the actor and
-    # value losses must use those same states for correct temporal alignment.
-    latents = imagined_trajectories.get(
-        "actor_latents", imagined_trajectories["latents"]
-    )
+    # Imagination stores a single state sequence s_0 ... s_H. Policy log-probs
+    # were produced from s_t, while rewards/continues were predicted from
+    # s_{t+1}; use the pre-action slice for actor and value losses.
+    latent_sequence = imagined_trajectories["latents"]
     rewards = imagined_trajectories["rewards"]
-    terminals = imagined_trajectories["terminals"]
-    continues = imagined_trajectories.get("continues")
-    if continues is None:
-        continues = continuation_for_returns_from_done(terminals, config)
+    continues = imagined_trajectories["continues"]
     entropies = imagined_trajectories["entropies"]
     log_probs = imagined_trajectories["log_probs"]
-    last_latent = imagined_trajectories["last_latent"]
 
     batch_size, horizon = rewards.shape
+    if latent_sequence.shape[1] != horizon + 1:
+        raise ValueError(
+            "imagined_trajectories['latents'] must contain horizon + 1 states"
+        )
+    latents = latent_sequence[:, :-1]
+    last_latent = latent_sequence[:, -1]
 
     with torch.no_grad():
         current_values = ema_critic(latents.detach()).mean.squeeze(-1)
@@ -1451,7 +1382,7 @@ class ContinuePredictor(nn.Module):
         input_dim = config.latent_dim
         output_dim = config.hidden_dim
         self.net = MLP(config, input_dim=input_dim, output_dim=output_dim, num_layers=1)
-        self.terminal_projection = nn.Sequential(nn.Linear(output_dim, 1), nn.Sigmoid())
+        self.continue_projection = nn.Sequential(nn.Linear(output_dim, 1), nn.Sigmoid())
         self._init_weights()
 
     def _init_weights(self):
@@ -1460,15 +1391,15 @@ class ContinuePredictor(nn.Module):
                 nn.init.orthogonal_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
-        nn.init.zeros_(self.terminal_projection[0].weight)
+        nn.init.zeros_(self.continue_projection[0].weight)
         nn.init.constant_(
-            self.terminal_projection[0].bias, self.config.continue_initial_logit
+            self.continue_projection[0].bias, self.config.continue_initial_logit
         )
 
     def forward(self, latent):
         """Predict continuation probability from latent state."""
         latent = to_tensor(latent, self.config.device)
-        return self.terminal_projection(self.net(latent))
+        return self.continue_projection(self.net(latent))
 
 
 class WorldModel(nn.Module):
@@ -1481,7 +1412,7 @@ class WorldModel(nn.Module):
         self.rssm = RSSM(config)
         self.decoder = ObservationDecoder(config)
         self.reward_predictor = RewardPredictor(config)
-        self.terminal_predictor = ContinuePredictor(config)
+        self.continue_predictor = ContinuePredictor(config)
 
     def encode(self, obs):
         return self.encoder(obs)
@@ -1518,8 +1449,8 @@ class WorldModel(nn.Module):
     def predict_reward(self, latent):
         return self.reward_predictor(latent)
 
-    def predict_terminal(self, latent):
-        return self.terminal_predictor(latent)
+    def predict_continue(self, latent):
+        return self.continue_predictor(latent)
 
 
 class SequenceReplayBuffer:

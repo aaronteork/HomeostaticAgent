@@ -14,8 +14,8 @@ class DreamerConfig(EnvConfig):
     rssm_unimix: float = 0.01
     free_nats: float = 1.0
     batch_size: int = 16
-    batch_length: int = 256
-    total_env_steps: int = 2_000_000
+    batch_length: int = 64
+    total_env_steps: int = 1_000_000
     replay_ratio: int = 128   # Was originally 512 to follow the paper for visual control but reduced to speed things up
     # total_updates: int = 1_000
     adam_eps: float = 1e-5
@@ -26,7 +26,7 @@ class DreamerConfig(EnvConfig):
     # Replay buffer parameters
     # replay_scaling: int = 64
     replay_capacity: int = 500_000  # paper is originally 5e6
-    min_buffer_size_before_training: int | None = 50_000
+    min_buffer_size_before_training: int | None = None
 
     # World model loss
     world_model_grad_norm_clip: float = 1000.0
@@ -36,9 +36,8 @@ class DreamerConfig(EnvConfig):
     heat_sensor_reconstruction_weight: float = 1.0
     dyn_loss_weight: float = 1.0
     rep_loss_weight: float = 0.1
-    kl_weight: float = 1.0
     reward_weight: float = 1.0
-    terminal_weight: float = 1.0
+    continue_weight: float = 1.0
     continue_initial_logit: float = 5.0
 
     # Imagination and optimisation
@@ -47,7 +46,7 @@ class DreamerConfig(EnvConfig):
     imagine_batch_size: int = 16
     # world_model_grad_steps_per_update: int = 1
     world_model_lr: float = 1e-4
-    ent_coef: float = 0.005
+    ent_coef: float = 3e-4
     return_norm_rate: float = 0.01
     return_norm_limit: float = 1.0
     return_norm_percentile_low: float = 5.0
