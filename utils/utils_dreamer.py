@@ -329,6 +329,15 @@ def imagination_rollout(
     imagined_entropies = []
     imagined_log_probs = []
 
+    # Official DreamerV3 includes continuation at the replay start when
+    # constructing cumulative actor/value loss weights. This masks imagined
+    # losses that start from terminal posterior states. Keep the factor in the
+    # same discounted convention as successor continuation factors.
+    with torch.no_grad():
+        start_continue = continue_predictor(latent).squeeze(-1)
+        if not config.contdisc:
+            start_continue = start_continue * config.gamma
+
     for step in range(horizon):
         action, _, dist = actor(latent.detach(), deterministic=False)
         imagined_actions.append(action)
@@ -371,6 +380,7 @@ def imagination_rollout(
         "actions": imagined_actions,
         "rewards": imagined_rewards,
         "continues": imagined_continues,
+        "start_continue": start_continue,
         "entropies": imagined_entropies,
         "log_probs": imagined_log_probs,
     }
@@ -393,9 +403,17 @@ def compute_lambda_returns_from_continues(rewards, values, continues, bootstrap,
     return returns
 
 
-def compute_discount_weights_from_continues(continues):
+def compute_discount_weights_from_continues(
+    continues, start_continue=None, discount_factor=1.0
+):
     _, horizon = continues.shape
     discount_weights = torch.ones_like(continues)
+    if start_continue is not None:
+        if discount_factor <= 0:
+            raise ValueError(
+                f"discount_factor must be positive, got {discount_factor}"
+            )
+        discount_weights[:, 0] = start_continue / discount_factor
     for t in range(1, horizon):
         discount_weights[:, t] = discount_weights[:, t - 1] * continues[:, t - 1]
     return discount_weights
@@ -485,6 +503,7 @@ def compute_actor_critic_loss(
     latent_sequence = imagined_trajectories["latents"]
     rewards = imagined_trajectories["rewards"]
     continues = imagined_trajectories["continues"]
+    start_continue = imagined_trajectories["start_continue"]
     entropies = imagined_trajectories["entropies"]
     log_probs = imagined_trajectories["log_probs"]
 
@@ -522,7 +541,11 @@ def compute_actor_critic_loss(
         advantages = (critic_returns - current_values) / return_scale
 
     with torch.no_grad():
-        discount_weights = compute_discount_weights_from_continues(continues.detach())
+        discount_weights = compute_discount_weights_from_continues(
+            continues.detach(),
+            start_continue=start_continue.detach(),
+            discount_factor=config.discount,
+        )
 
     entropy = entropies.mean()
     actor_objective = (
@@ -1230,8 +1253,14 @@ class ActorNetwork(nn.Module):
         )
 
         # Beta distribution parameters for continuous actions
-        self.alpha = nn.Linear(config.hidden_dim, action_dim)
-        self.beta = nn.Linear(config.hidden_dim, action_dim)
+        self.alpha = nn.Sequential(
+            nn.Linear(config.hidden_dim, action_dim),
+            nn.Softplus()
+        )
+        self.beta = nn.Sequential(
+            nn.Linear(config.hidden_dim, action_dim),
+            nn.Softplus()
+        )
 
         self._init_weights()
 
@@ -1263,9 +1292,8 @@ class ActorNetwork(nn.Module):
             squeeze_output = False
 
         x = self.net(latent_flat)
-        alpha = F.softplus(self.alpha(x)) + 1.0
-        beta = F.softplus(self.beta(x)) + 1.0
-
+        alpha = self.alpha(x) + 1.0
+        beta = self.beta(x) + 1.0
         dist = Beta(alpha, beta)
         if deterministic:
             action = dist.mode  # Beta mode in [0, 1] because alpha,beta > 1
