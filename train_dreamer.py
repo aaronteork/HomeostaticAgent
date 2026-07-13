@@ -71,6 +71,12 @@ def train_dreamer():
     )
     logger.info("Created actor, critic, and EMA critic networks")
 
+    # Create model save timestamp
+    timestamp = dt.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    model_path_world_model = f"./models/dreamer_world_model_{timestamp}.pt"
+    model_path_actor = f"./models/dreamer_actor_{timestamp}.pt"
+    model_path_critic = f"./models/dreamer_critic_{timestamp}.pt"
+
     # Create replay buffer
     replay_buffer = SequenceReplayBuffer(cfg, device=cfg.device)
     logger.info("Created replay buffer")
@@ -425,13 +431,14 @@ def train_dreamer():
                 )
             mlflow.log_metrics(train_metrics, step=global_step)
             iteration += 1
+            
+            if global_step % 100_000 == 0 and global_step > 0:
+                logger.info(f"Global step {global_step}: Saving models...")
+                torch.save(world_model.state_dict(), model_path_world_model)
+                torch.save(actor.state_dict(), model_path_actor)
+                torch.save(critic.state_dict(), model_path_critic)
 
     # Save models
-    timestamp = dt.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    model_path_world_model = f"./models/dreamer_world_model_{timestamp}.pt"
-    model_path_actor = f"./models/dreamer_actor_{timestamp}.pt"
-    model_path_critic = f"./models/dreamer_critic_{timestamp}.pt"
-
     torch.save(world_model.state_dict(), model_path_world_model)
     torch.save(actor.state_dict(), model_path_actor)
     torch.save(critic.state_dict(), model_path_critic)
