@@ -1419,10 +1419,10 @@ class ContinuePredictor(nn.Module):
                 nn.init.orthogonal_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
-        nn.init.zeros_(self.continue_projection[0].weight)
-        nn.init.constant_(
-            self.continue_projection[0].bias, self.config.continue_initial_logit
-        )
+        # nn.init.zeros_(self.continue_projection[0].weight)
+        # nn.init.constant_(
+        #     self.continue_projection[0].bias, self.config.continue_initial_logit
+        # )
 
     def forward(self, latent):
         """Predict continuation probability from latent state."""

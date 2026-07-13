@@ -164,7 +164,7 @@ def train_dreamer():
             #   Current observation 
             #   Action taken because of the current observation
             #   The reward from the previous action that led to this state
-            #   If the current observation is done/terminal??  # XXX: Need to confirm this
+            #   If the current observation is done/terminal??  # Yes
             #   The is_first flag for the current observation
             for i in range(cfg.num_workers):
                 obs_single = {
