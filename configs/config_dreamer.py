@@ -15,8 +15,8 @@ class DreamerConfig(EnvConfig):
     free_nats: float = 1.0
     batch_size: int = 16
     batch_length: int = 64
-    total_env_steps: int = 250_000
-    replay_ratio: int = 128   # Was originally 512 to follow the paper for visual control but reduced to speed things up
+    total_env_steps: int = 500_000
+    replay_ratio: int = 512   # Was originally 512 to follow the paper for visual control but reduced to speed things up
     # total_updates: int = 1_000
     adam_eps: float = 1e-5
     two_hot_bins: int = 255
@@ -25,7 +25,7 @@ class DreamerConfig(EnvConfig):
 
     # Replay buffer parameters
     # replay_scaling: int = 64
-    replay_capacity: int = 500_000  # paper is originally 5e6
+    replay_capacity: int = 5_000_000  # paper is originally 5e6
     min_buffer_size_before_training: int | None = None
 
     # World model loss
@@ -38,7 +38,7 @@ class DreamerConfig(EnvConfig):
     rep_loss_weight: float = 0.1
     reward_weight: float = 1.0
     continue_weight: float = 1.0
-    continue_initial_logit: float = 5.0
+    # continue_initial_logit: float = 5.0
 
     # Imagination and optimisation
     imagine_horizon: int = 15
