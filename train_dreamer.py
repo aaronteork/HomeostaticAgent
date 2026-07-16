@@ -427,7 +427,9 @@ def train_dreamer():
                         "train/value_loss": critic_loss_value,
                         "train/entropy": ac_metrics.get("actor_critic/entropy", 0.0),
                         "train/learning_rate": actor_optimizer.param_groups[0]["lr"],
-                        "train/kl_divergence": 0.0,
+                        # "train/kl_divergence": 0.0,
+                        "train/dyn_loss": wm_metrics.get("world_model/dyn_loss", 0.0),
+                        "train/rep_loss": wm_metrics.get("world_model/rep_loss", 0.0),
                         "train/explained_variance": ac_metrics.get(
                             "actor_critic/explained_variance", 0.0
                         ),

@@ -269,8 +269,8 @@ def compute_world_model_loss(
         # "world_model/reconstruction_internal_state_loss": recon_losses[
         #     "internal_state"
         # ].item(),
-        # "world_model/dyn_loss": dyn_loss.item(),
-        # "world_model/rep_loss": rep_loss.item(),
+        "world_model/dyn_loss": dyn_loss.item(),
+        "world_model/rep_loss": rep_loss.item(),
         # "world_model/reward_loss": reward_loss.item(),
         # "world_model/continue_loss": continue_loss.item(),
         # "world_model/predicted_continue": predicted_continue.mean().item(),
@@ -912,93 +912,137 @@ class MLP(nn.Module):
         return self.net(x)
 
 
-# From https://github.com/eclectic-sheep/sheeprl/blob/33b636681fd8b5340b284f2528db8821ab8dcd0b/sheeprl/models/models.py
-class LayerNormGRUCell(nn.Module):
-    """A GRU cell with a LayerNorm, taken
-    from https://github.com/danijar/dreamerv2/blob/main/dreamerv2/common/nets.py#L317.
+class BlockLinear(nn.Module):
+    """Linear projection whose weight matrix is block diagonal."""
 
-    This particular GRU cell accepts 3-D inputs, with a sequence of length 1, and applies
-    a LayerNorm after the projection of the inputs.
+    def __init__(
+        self, input_size: int, output_size: int, blocks: int, bias: bool = True
+    ) -> None:
+        super().__init__()
+        if input_size % blocks != 0:
+            raise ValueError(
+                f"input_size ({input_size}) must be divisible by blocks ({blocks})"
+            )
+        if output_size % blocks != 0:
+            raise ValueError(
+                f"output_size ({output_size}) must be divisible by blocks ({blocks})"
+            )
+        self.input_size = input_size
+        self.output_size = output_size
+        self.blocks = blocks
+        self.input_block_size = input_size // blocks
+        self.output_block_size = output_size // blocks
+        self.weight = nn.Parameter(
+            torch.empty(blocks, self.output_block_size, self.input_block_size)
+        )
+        self.bias = (
+            nn.Parameter(torch.empty(blocks, self.output_block_size)) if bias else None
+        )
+        self.reset_parameters()
 
-    Args:
-        input_size (int): the input size.
-        hidden_size (int): the hidden state size
-        bias (bool, optional): whether to apply a bias to the input projection.
-            Defaults to True.
-        batch_first (bool, optional): whether the first dimension represent the batch dimension or not.
-            Defaults to False.
-        layer_norm_cls (Callable[..., nn.Module]): the layer norm to apply after the input projection.
-            Defaults to nn.Identiy.
-        layer_norm_kw (Dict[str, Any]): the kwargs of the layer norm.
-            Default to {}.
-    """
+    def reset_parameters(self) -> None:
+        for block_weight in self.weight:
+            nn.init.orthogonal_(block_weight)
+        if self.bias is not None:
+            nn.init.zeros_(self.bias)
+
+    def forward(self, x: Tensor) -> Tensor:
+        if x.shape[-1] != self.input_size:
+            raise ValueError(
+                f"expected input width {self.input_size}, got {x.shape[-1]}"
+            )
+        grouped = x.reshape(*x.shape[:-1], self.blocks, self.input_block_size)
+        output = torch.einsum("...gi,goi->...go", grouped, self.weight)
+        if self.bias is not None:
+            output = output + self.bias
+        return output.reshape(*x.shape[:-1], self.output_size)
+
+
+class BlockGRUCell(nn.Module):
+    """DreamerV3 deterministic core with block-diagonal hidden and GRU weights."""
 
     def __init__(
         self,
-        input_size: int,
+        deter_size: int,
+        stoch_size: int,
+        action_size: int,
         hidden_size: int,
-        bias: bool = True,
-        batch_first: bool = False,
-        layer_norm_cls: Callable[..., nn.Module] = nn.LayerNorm,
-        layer_norm_kw: Dict[str, Any] = {},
+        blocks: int = 8,
+        dyn_layers: int = 1,
     ) -> None:
         super().__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.bias = bias
-        self.batch_first = batch_first
-        self.linear = nn.Linear(
-            input_size + hidden_size, 3 * hidden_size, bias=self.bias
-        )
-        # Avoid multiple values for the `normalized_shape` argument
-        layer_norm_kw.pop("normalized_shape", None)
-        self.layer_norm = layer_norm_cls(3 * hidden_size, **layer_norm_kw)
-
-    def forward(self, input: Tensor, hx: Optional[Tensor] = None) -> Tensor:
-        is_3d = input.dim() == 3
-        if is_3d:
-            if input.shape[int(self.batch_first)] == 1:
-                input = input.squeeze(int(self.batch_first))
-            else:
-                raise AssertionError(
-                    "LayerNormGRUCell: Expected input to be 3-D with sequence length equal to 1 but received "
-                    f"a sequence of length {input.shape[int(self.batch_first)]}"
-                )
-        if hx.dim() == 3:
-            hx = hx.squeeze(0)
-        assert input.dim() in (
-            1,
-            2,
-        ), (
-            f"LayerNormGRUCell: Expected input to be 1-D or 2-D but received {input.dim()}-D tensor"
-        )
-
-        is_batched = input.dim() == 2
-        if not is_batched:
-            input = input.unsqueeze(0)
-
-        if hx is None:
-            hx = torch.zeros(
-                input.size(0), self.hidden_size, dtype=input.dtype, device=input.device
+        if deter_size % blocks != 0:
+            raise ValueError(
+                f"deter_size ({deter_size}) must be divisible by blocks ({blocks})"
             )
-        else:
-            hx = hx.unsqueeze(0) if not is_batched else hx
+        if dyn_layers < 1:
+            raise ValueError("dyn_layers must be at least 1")
+        self.deter_size = deter_size
+        self.stoch_size = stoch_size
+        self.blocks = blocks
+        self.deter_block_size = deter_size // blocks
 
-        input = torch.cat((hx, input), -1)
-        x = self.linear(input)
-        x = self.layer_norm(x)
-        reset, cand, update = torch.chunk(x, 3, -1)
-        reset = torch.sigmoid(reset)
-        cand = torch.tanh(reset * cand)
-        update = torch.sigmoid(update - 1)
-        hx = update * cand + (1 - update) * hx
+        def input_projection(input_size: int) -> nn.Sequential:
+            return nn.Sequential(
+                nn.Linear(input_size, hidden_size),
+                nn.RMSNorm(hidden_size, eps=1e-4),
+                nn.SiLU(),
+            )
 
-        if not is_batched:
-            hx = hx.squeeze(0)
-        elif is_3d:
-            hx = hx.unsqueeze(0)
+        self.deter_input = input_projection(deter_size)
+        self.stoch_input = input_projection(stoch_size)
+        self.action_input = input_projection(action_size)
 
-        return hx
+        # Each block receives its deterministic slice and a copy of the three
+        # global input embeddings, matching the official DreamerV3 RSSM core.
+        first_hidden_size = deter_size + blocks * 3 * hidden_size
+        self.dynamic_layers = nn.ModuleList()
+        for layer_index in range(dyn_layers):
+            input_size = first_hidden_size if layer_index == 0 else deter_size
+            self.dynamic_layers.append(
+                nn.Sequential(
+                    BlockLinear(input_size, deter_size, blocks),
+                    nn.RMSNorm(deter_size, eps=1e-4),
+                    nn.SiLU(),
+                )
+            )
+        self.gate_projection = BlockLinear(deter_size, 3 * deter_size, blocks)
+
+    def forward(self, stoch: Tensor, deter: Tensor, action: Tensor) -> Tensor:
+        stoch = stoch.reshape(*stoch.shape[:-2], self.stoch_size)
+        action_scale = torch.maximum(torch.ones_like(action), action.abs()).detach()
+        action = action / action_scale
+
+        global_features = torch.cat(
+            [
+                self.deter_input(deter),
+                self.stoch_input(stoch),
+                self.action_input(action),
+            ],
+            dim=-1,
+        )
+        repeated_features = global_features.unsqueeze(-2).expand(
+            *global_features.shape[:-1], self.blocks, global_features.shape[-1]
+        )
+        grouped_deter = deter.reshape(
+            *deter.shape[:-1], self.blocks, self.deter_block_size
+        )
+        x = torch.cat([grouped_deter, repeated_features], dim=-1).reshape(
+            *deter.shape[:-1], -1
+        )
+        for layer in self.dynamic_layers:
+            x = layer(x)
+
+        gates = self.gate_projection(x).reshape(
+            *deter.shape[:-1], self.blocks, 3 * self.deter_block_size
+        )
+        reset, candidate, update = gates.chunk(3, dim=-1)
+        reset = reset.reshape(*deter.shape[:-1], self.deter_size).sigmoid()
+        candidate = candidate.reshape(*deter.shape[:-1], self.deter_size)
+        candidate = torch.tanh(reset * candidate)
+        update = update.reshape(*deter.shape[:-1], self.deter_size)
+        update = torch.sigmoid(update - 1.0)
+        return update * candidate + (1.0 - update) * deter
 
 
 class RSSM(nn.Module):
@@ -1020,13 +1064,14 @@ class RSSM(nn.Module):
         self.unimix = config.rssm_unimix
         self.initial_recurrent_state = nn.Parameter(torch.zeros(self.recurrent_units))
 
-        recurrent_input_dim = config.action_space_dim + self.stochastic_size
-        self.recurrent_input = nn.Sequential(
-            nn.Linear(recurrent_input_dim, config.hidden_dim),
-            nn.RMSNorm(config.hidden_dim),
-            nn.SiLU(),
+        self.gru = BlockGRUCell(
+            deter_size=self.recurrent_units,
+            stoch_size=self.stochastic_size,
+            action_size=config.action_space_dim,
+            hidden_size=config.hidden_dim,
+            blocks=config.rssm_blocks,
+            dyn_layers=config.rssm_dyn_layers,
         )
-        self.gru = LayerNormGRUCell(config.hidden_dim, self.recurrent_units)
 
         # Both prior and posterior networks are MLPs with one hidden layer, outputting logits for the categorical distribution
         self.prior_network = nn.Sequential(
@@ -1053,7 +1098,10 @@ class RSSM(nn.Module):
     def _init_weights(self):
         for name, param in self.named_parameters():
             if "weight" in name:
-                if len(param.shape) > 1:
+                if len(param.shape) == 3:
+                    for block_weight in param:
+                        nn.init.orthogonal_(block_weight)
+                elif len(param.shape) > 1:
                     nn.init.orthogonal_(param)
             elif "bias" in name:
                 nn.init.zeros_(param)
@@ -1129,13 +1177,7 @@ class RSSM(nn.Module):
         self, stochastic_state: Tensor, action: Tensor, recurrent_state: Tensor
     ) -> Tensor:
         # Gets h_t from z_{t-1} and a_{t-1}
-        # Included the GRU here
-        stochastic_flat = stochastic_state.reshape(
-            stochastic_state.shape[0], self.stochastic_size
-        )
-        action = action / torch.maximum(torch.ones_like(action), action.abs())
-        recurrent_input = torch.cat([stochastic_flat, action], dim=-1)
-        return self.gru(self.recurrent_input(recurrent_input), recurrent_state)
+        return self.gru(stochastic_state, recurrent_state, action)
 
     def imagine_step(
         self,
