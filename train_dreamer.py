@@ -7,6 +7,8 @@ import torch
 from torch.optim import Adam
 
 from configs.config_dreamer import DreamerConfig
+from utils.laprop import LaProp
+from utils.agc import agc
 from utils.utils_env import create_env
 from utils.utils_logger import create_logger
 from utils.utils_dreamer import (
@@ -83,10 +85,9 @@ def train_dreamer():
 
     # Create optimizers
     # Stick to Adam for simplicity, the paper mentioned that they used some LaProp and adaptive global gradient clipping to stabilise training
-    world_model_params = list(world_model.parameters())
-    world_model_optimizer = Adam(world_model_params, lr=cfg.world_model_lr, eps=cfg.adam_eps)
-    actor_optimizer = Adam(actor.parameters(), lr=cfg.actor_lr, eps=cfg.adam_eps)
-    critic_optimizer = Adam(critic.parameters(), lr=cfg.critic_lr, eps=cfg.adam_eps)
+    world_model_optimizer = LaProp(world_model.parameters(), lr=cfg.laprop_lr, eps=cfg.laprop_eps, betas=(cfg.laprop_beta1, cfg.laprop_beta2))
+    actor_optimizer = LaProp(actor.parameters(), lr=cfg.laprop_lr, eps=cfg.laprop_eps, betas=(cfg.laprop_beta1, cfg.laprop_beta2))
+    critic_optimizer = LaProp(critic.parameters(), lr=cfg.laprop_lr, eps=cfg.laprop_eps, betas=(cfg.laprop_beta1, cfg.laprop_beta2))
     logger.info("Created optimizers")
 
     # # Learning rate schedulers
@@ -319,7 +320,8 @@ def train_dreamer():
                     # pre-update posterior states for imagination.
                     world_model_optimizer.zero_grad()
                     wm_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(world_model_params, cfg.world_model_grad_norm_clip)
+                    agc(world_model.parameters())
+                    # torch.nn.utils.clip_grad_norm_(world_model.parameters(), cfg.world_model_grad_norm_clip)
 
                     total_wm_loss += wm_loss.item()
                     # total_reconstruction_loss += wm_metrics['world_model/reconstruction_loss']
@@ -373,13 +375,15 @@ def train_dreamer():
 
                     actor_optimizer.zero_grad()
                     actor_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(
-                            actor.parameters(), cfg.actor_grad_norm_clip
-                        )
+                    agc(actor.parameters())
+                    # torch.nn.utils.clip_grad_norm_(
+                    #         actor.parameters(), cfg.actor_grad_norm_clip
+                    #     )
 
                     critic_optimizer.zero_grad()
                     critic_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(critic.parameters(), cfg.critic_grad_norm_clip)
+                    agc(critic.parameters())
+                    # torch.nn.utils.clip_grad_norm_(critic.parameters(), cfg.critic_grad_norm_clip)
                     # critic_scheduler.step()
 
                     world_model_optimizer.step()
