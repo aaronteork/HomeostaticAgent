@@ -6,12 +6,14 @@ from configs.config_env import EnvConfig
 class DreamerConfig(EnvConfig):
     # Model parameters
     hidden_dim: int = 256
-    recurrent_units: int = 1024  # 8 * hidden_dim
+    recurrent_units: int = 2048  # 8 * hidden_dim
     base_cnn_channels: int = 16  # hidden_dim // 16
     mlp_n_layers: int = 3
     stochastic_units: int = 32
     discrete_classes: int = 16  # hidden_dim // 16
     rssm_unimix: float = 0.01
+    rssm_blocks: int = 8
+    rssm_dyn_layers: int = 1
     free_nats: float = 1.0
     batch_size: int = 16
     batch_length: int = 64
