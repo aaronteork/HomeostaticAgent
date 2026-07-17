@@ -586,17 +586,17 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
             or abs(self.temperature) > 0.99999
         )
 
-        # Orientation check (True Flip Check)
-        # xmat[8] is the world-Z component of the torso's local Z-axis (Up)
-        # 1.0 = upright, 0.0 = on side, -1.0 = upside down
-        up_vector_z = self.data.xmat[self.ant_body_id][8]
-        is_flipped = up_vector_z < 0.0
+        # # Orientation check (True Flip Check)
+        # # xmat[8] is the world-Z component of the torso's local Z-axis (Up)
+        # # 1.0 = upright, 0.0 = on side, -1.0 = upside down
+        # up_vector_z = self.data.xmat[self.ant_body_id][8]
+        # is_flipped = up_vector_z < 0.0
 
         # # Height check
         # z_pos = self.data.xpos[self.ant_body_id][2]
         # is_too_low = z_pos < 0.2 or z_pos > 1.0
 
-        return bool(limit_reached) or is_flipped  # or is_too_low
+        return bool(limit_reached)  # or is_flipped  # or is_too_low
 
     @property
     def truncated(self):
