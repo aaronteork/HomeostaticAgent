@@ -1,19 +1,14 @@
-import numpy as np
-
-import torch
 import torch.nn as nn
 from torch import Tensor
-from typing import Tuple
 
 
 class VisionEncoder(nn.Module):
     """Vision encoder shared between PPO and Dreamer
-    depth is given by 256 / 16 = 16, which is the default value for depth
     channel multiplication is (2, 3, 4, 4) which follows their official implementation
     kernel size of 4 differs from their implementation, but follows SheepRL
     """
 
-    def __init__(self, input_channels=12, depth=16):
+    def __init__(self, input_channels=12, depth=4):
         super().__init__()
         
         # 1. Feature Extraction: 4-stage hierarchy

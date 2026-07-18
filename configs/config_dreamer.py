@@ -5,16 +5,14 @@ from configs.config_env import EnvConfig
 @dataclass(frozen=True, kw_only=True)
 class DreamerConfig(EnvConfig):
     # Model parameters
-    hidden_dim: int = 256
-    recurrent_units: int = 2048  # 8 * hidden_dim
-    base_cnn_channels: int = 16  # hidden_dim // 16
-    mlp_n_layers: int = 3
+    hidden_dim: int = 64
     stochastic_units: int = 32
-    discrete_classes: int = 16  # hidden_dim // 16
+
     rssm_unimix: float = 0.01
     rssm_blocks: int = 8
     rssm_dyn_layers: int = 1
     free_nats: float = 1.0
+    mlp_n_layers: int = 3
     batch_size: int = 16
     batch_length: int = 64
     total_env_steps: int = 500_000
@@ -102,3 +100,15 @@ class DreamerConfig(EnvConfig):
         if self.contdisc:
             return 1.0 - 1.0 / self.horizon
         return self.gamma
+
+    @property
+    def recurrent_units(self) -> int:
+        return 8 * self.hidden_dim
+
+    @property
+    def base_cnn_channels(self) -> int:
+        return self.hidden_dim // 16
+
+    @property
+    def discrete_classes(self) -> int:
+        return self.hidden_dim // 16
