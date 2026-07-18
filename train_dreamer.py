@@ -48,17 +48,18 @@ def train_dreamer():
     logger.info(f"Created parallel environment with {cfg.num_workers} workers")
 
     # Create world model
+    torch.set_float32_matmul_precision('high') 
     world_model = WorldModel(cfg).to(cfg.device)
-    world_model = torch.compile(world_model, mode="reduce-overhead")
+    world_model = torch.compile(world_model, dynamic=True)
     logger.info("Created world model")
 
     # Create actor-critic
     actor = ActorNetwork(cfg)
     actor.to(cfg.device)
-    actor = torch.compile(actor, mode="reduce-overhead")
+    actor = torch.compile(actor, dynamic=True)
     critic = CriticNetwork(cfg)
     critic.to(cfg.device)
-    critic = torch.compile(critic, mode="reduce-overhead")
+    critic = torch.compile(critic, dynamic=True)
     ema_critic = CriticNetwork(cfg)
     ema_critic.to(cfg.device)
     ema_critic.load_state_dict(critic.state_dict())

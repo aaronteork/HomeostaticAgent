@@ -33,6 +33,7 @@ def train_ppo():
 
     # Get config
     cfg = PPOConfig()
+    logger.info(f"Config: {cfg}")
 
     # Create environment
     env = create_env(cfg, multiple_env=True)
@@ -43,8 +44,10 @@ def train_ppo():
     logger.info("Created replay buffer")
 
     # Create agent
+    torch.set_float32_matmul_precision('high') 
     agent = HomeostaticPPO(cfg)
     agent.to(cfg.device)
+    agent = torch.compile(agent)
     optimizer = Adam(agent.parameters(), lr=cfg.lr_start, eps=cfg.adam_eps)
     scheduler = LinearLR(optimizer, start_factor=1.0, end_factor=0.1, total_iters=cfg.total_updates)
     logger.info("Created PPO agent and optimizer")
