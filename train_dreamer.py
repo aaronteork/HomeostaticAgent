@@ -4,18 +4,15 @@ from dataclasses import asdict
 import numpy as np
 import mlflow
 import torch
-from torch.optim import Adam
 
 from configs.config_dreamer import DreamerConfig
 from utils.laprop import LaProp
 from utils.agc import agc
 from utils.utils_env import create_env
 from utils.utils_logger import create_logger
+from utils.world_model import WorldModel, ActorNetwork, CriticNetwork
+from utils.replay_buffer_dreamer import SequenceReplayBuffer
 from utils.utils_dreamer import (
-    WorldModel,
-    ActorNetwork,
-    CriticNetwork,
-    SequenceReplayBuffer,
     PercentileEMANormalizer,
     compute_world_model_loss,
     compute_actor_critic_loss,
