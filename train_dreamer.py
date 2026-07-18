@@ -49,12 +49,15 @@ def train_dreamer():
 
     # Create world model
     world_model = WorldModel(cfg).to(cfg.device)
+    world_model = torch.compile(world_model, mode="reduce-overhead")
     logger.info("Created world model")
 
     # Create actor-critic
     actor = ActorNetwork(cfg)
+    actor = torch.compile(actor, mode="reduce-overhead")
     actor.to(cfg.device)
     critic = CriticNetwork(cfg)
+    critic = torch.compile(critic, mode="reduce-overhead")
     critic.to(cfg.device)
     ema_critic = CriticNetwork(cfg)
     ema_critic.to(cfg.device)
