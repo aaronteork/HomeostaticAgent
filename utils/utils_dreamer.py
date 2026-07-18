@@ -892,17 +892,13 @@ class MLP(nn.Module):
         self, config: DreamerConfig, input_dim: int, output_dim: int, num_layers: int
     ):
         super().__init__()
+        if num_layers < 1:
+            raise ValueError(f"num_layers must be at least 1, got {num_layers}")
+
         layers = []
         for i in range(num_layers):
-            if i == 0:
-                dim_in = input_dim
-                dim_out = config.hidden_dim
-            elif i == num_layers - 1:
-                dim_in = config.hidden_dim
-                dim_out = output_dim
-            else:
-                dim_in = config.hidden_dim
-                dim_out = config.hidden_dim
+            dim_in = input_dim if i == 0 else config.hidden_dim
+            dim_out = output_dim if i == num_layers - 1 else config.hidden_dim
             layers.append(nn.Linear(dim_in, dim_out))
             layers.append(nn.RMSNorm(dim_out))
             layers.append(nn.SiLU())
