@@ -228,7 +228,9 @@ class BlockLinear(nn.Module):
 
 
 class BlockGRUCell(nn.Module):
-    """DreamerV3 deterministic core with block-diagonal hidden and GRU weights."""
+    """DreamerV3 deterministic core with block-diagonal hidden and GRU weights.
+    Follows the official DreamerV3 implementation
+    """
 
     def __init__(
         self,
@@ -279,8 +281,6 @@ class BlockGRUCell(nn.Module):
 
     def forward(self, stoch: Tensor, deter: Tensor, action: Tensor) -> Tensor:
         stoch = stoch.reshape(*stoch.shape[:-2], self.stoch_size)
-        action_scale = torch.maximum(torch.ones_like(action), action.abs()).detach()
-        action = action / action_scale
 
         global_features = torch.cat(
             [
@@ -343,12 +343,14 @@ class RSSM(nn.Module):
         )
 
         # Both prior and posterior networks are MLPs with one hidden layer, outputting logits for the categorical distribution
+        # Prior network uses 2 layers MLP while posterior network uses 1 layer MLP.
+        # This is consistent with the official DreamerV3 implementation.
         self.prior_network = nn.Sequential(
             MLP(
                 config,
                 input_dim=self.recurrent_units,
                 output_dim=config.hidden_dim,
-                num_layers=1,
+                num_layers=2,
             ),
             nn.Linear(config.hidden_dim, self.stochastic_units * self.discrete_classes),
         )
