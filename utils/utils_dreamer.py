@@ -85,7 +85,10 @@ def prepare_sequence_batch(batch_data, cfg):
             for reward in seq
         ]
     ).view(batch_size, seq_len)
-    dones = to_tensor(np.asarray(batch_data["dones"]).squeeze(-1), cfg.device)
+    terminals = to_tensor(
+        np.asarray(batch_data["terminals"]).squeeze(-1), cfg.device
+    )
+    is_last = to_tensor(np.asarray(batch_data["is_last"]).squeeze(-1), cfg.device)
     is_first = to_tensor(np.asarray(batch_data["is_first"]), cfg.device)
 
     if "prev_actions" in batch_data:
@@ -127,7 +130,8 @@ def prepare_sequence_batch(batch_data, cfg):
         actions,
         prev_actions,
         rewards,
-        dones,
+        terminals,
+        is_last,
         is_first,
         initial_stochastic,
         initial_recurrent,
@@ -146,7 +150,7 @@ def compute_world_model_loss(
     obs,
     is_first,
     reward,
-    done,
+    terminal,
     config: DreamerConfig,
     initial_stochastic=None,
     initial_recurrent=None,
@@ -166,7 +170,8 @@ def compute_world_model_loss(
         obs: dict of observation targets
         is_first: (batch, seq_len)
         reward: (batch, seq_len) - target rewards
-        done: (batch, seq_len) - target terminals
+        terminal: (batch, seq_len) - true environmental terminal targets;
+            time-limit truncations remain nonterminal
         config: DreamerConfig
 
     Returns:
@@ -194,7 +199,7 @@ def compute_world_model_loss(
     recon_losses = {
         key: F.mse_loss(reconstructed_obs[key], obs[key])
         if key == "vision"
-        else F.mse_loss(symlog(reconstructed_obs[key]), symlog(obs[key]))
+        else F.mse_loss(reconstructed_obs[key], symlog(obs[key]))
         for key in reconstructed_obs.keys()
     }
     recon_loss = (
@@ -229,7 +234,7 @@ def compute_world_model_loss(
 
     # ===== Reward Prediction Loss =====
     # Replay rows follow the Dreamer convention: latent_t is built from
-    # (obs_t, action_{t-1}), and reward_t/done_t are the transition outcome that
+    # (obs_t, action_{t-1}), and reward_t/terminal_t are the transition outcome that
     # led into obs_t. Train reward and continuation from the posterior feature,
     # matching the official DreamerV3 world-model loss.
     reward_target = reward.contiguous().view(batch_size, seq_len, 1)
@@ -240,8 +245,8 @@ def compute_world_model_loss(
     # DreamerV3 predicts continuation, and with contdisc enabled it predicts the
     # discounted continuation used directly in lambda returns.
     predicted_continue = continue_predictor(latent)  # (batch, seq_len, 1)
-    done_target = done.contiguous().view(batch_size, seq_len, 1).float()
-    continue_target = 1.0 - done_target
+    terminal_target = terminal.contiguous().view(batch_size, seq_len, 1).float()
+    continue_target = 1.0 - terminal_target
     if config.contdisc:
         continue_target = continue_target * config.discount
     continue_loss = F.binary_cross_entropy(predicted_continue, continue_target)
@@ -411,25 +416,45 @@ def compute_discount_weights_from_continues(
     return discount_weights
 
 
-def compute_replay_lambda_returns(rewards, values, terminals, bootstrap, config):
-    """Return targets for replay states using reward_{t+1}, not reward_t."""
+def compute_replay_lambda_returns(
+    rewards, values, terminals, is_last, bootstrap, config
+):
+    """Return replay targets without crossing reset boundaries.
+
+    True terminals suppress bootstrapping. Truncated ``is_last`` rows stop the
+    lambda trace but retain the one-step value bootstrap from their final
+    observation.
+    """
     if rewards.shape[1] < 2:
         raise ValueError("Replay value loss needs at least two timesteps")
 
     rewards_next = rewards[:, 1:]
     terminals_next = terminals[:, 1:]
-    current_terminals = terminals[:, :-1]
+    is_last_next = is_last[:, 1:]
+    current_is_last = is_last[:, :-1]
     values_for_loss = values[:, :-1]
-    continues_next = (1.0 - terminals_next.float()) * config.discount
-    replay_returns = compute_lambda_returns_from_continues(
-        rewards=rewards_next,
-        values=values_for_loss,
-        continues=continues_next,
-        bootstrap=bootstrap.detach(),
-        lam=config.gae_lambda,
-    )
-    discount_weights = compute_discount_weights_from_continues(continues_next.detach())
-    discount_weights = discount_weights * (1.0 - current_terminals.detach())
+    live_next = (1.0 - terminals_next.float()) * config.discount
+    trace_next = (1.0 - is_last_next.float()) * config.gae_lambda
+
+    replay_returns = torch.zeros_like(rewards_next)
+    next_return = bootstrap.detach()
+    for t in reversed(range(rewards_next.shape[1])):
+        next_value = (
+            bootstrap.detach()
+            if t == rewards_next.shape[1] - 1
+            else values_for_loss[:, t + 1]
+        )
+        target = rewards_next[:, t] + live_next[:, t] * (
+            (1.0 - trace_next[:, t]) * next_value
+            + trace_next[:, t] * next_return
+        )
+        replay_returns[:, t] = target
+        next_return = target
+
+    # Replay sequences can cross reset boundaries, so cumulative imagination
+    # weights are inappropriate here. Match official replay value learning by
+    # masking only boundary rows; reset rows start a fresh episode at weight 1.
+    discount_weights = 1.0 - current_is_last.detach()
     return replay_returns, discount_weights
 
 
@@ -439,6 +464,7 @@ def compute_replay_value_loss(
     latents = replay_trajectories["latents"].detach()
     rewards = replay_trajectories["rewards"].detach()
     terminals = replay_trajectories["terminals"].detach()
+    is_last = replay_trajectories["is_last"].detach()
 
     with torch.no_grad():
         values = ema_critic(latents).mean.squeeze(-1)
@@ -446,6 +472,7 @@ def compute_replay_value_loss(
             rewards,
             values,
             terminals,
+            is_last,
             bootstrap=bootstrap.detach(),
             config=config,
         )

@@ -137,15 +137,15 @@ class ObservationDecoder(nn.Module):
         # Proprioception
         proprioception = self.proprioception_decoder(latent)
         proprioception = self.proprioception_decoder_projection(proprioception)
-        proprioception = symexp(
-            proprioception
-        )  # Apply symexp to map back to original scale
+        # proprioception = symexp(
+        #     proprioception
+        # )  # Apply symexp to map back to original scale
         # Internal state
         internal_state = self.internal_state_decoder(latent)
         internal_state = self.internal_state_decoder_projection(internal_state)
-        internal_state = symexp(
-            internal_state
-        )  # Apply symexp to map back to original scale
+        # internal_state = symexp(
+        #     internal_state
+        # )  # Apply symexp to map back to original scale
         return {
             "vision": vision,
             "proprioception": proprioception,
@@ -684,10 +684,8 @@ class RewardPredictor(nn.Module):
     def __init__(self, config: DreamerConfig):
         super().__init__()
         self.config = config
-        input_dim = config.latent_dim
-        output_dim = config.hidden_dim
-        self.net = MLP(config, input_dim=input_dim, output_dim=output_dim, num_layers=1)
-        self.reward_projection = nn.Linear(output_dim, config.two_hot_bins)
+        self.net = MLP(config, input_dim=config.latent_dim, output_dim=config.hidden_dim, num_layers=1)
+        self.reward_projection = nn.Linear(config.hidden_dim, config.two_hot_bins)
         self._init_weights()
 
     def _init_weights(self):
@@ -718,10 +716,8 @@ class ContinuePredictor(nn.Module):
     def __init__(self, config: DreamerConfig):
         super().__init__()
         self.config = config
-        input_dim = config.latent_dim
-        output_dim = config.hidden_dim
-        self.net = MLP(config, input_dim=input_dim, output_dim=output_dim, num_layers=1)
-        self.continue_projection = nn.Sequential(nn.Linear(output_dim, 1), nn.Sigmoid())
+        self.net = MLP(config, input_dim=config.latent_dim, output_dim=config.hidden_dim, num_layers=1)
+        self.continue_projection = nn.Sequential(nn.Linear(config.hidden_dim, 1), nn.Sigmoid())
         self._init_weights()
 
     def _init_weights(self):

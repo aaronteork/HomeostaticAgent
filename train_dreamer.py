@@ -106,7 +106,8 @@ def train_dreamer():
     prev_action = torch.zeros(cfg.num_workers, cfg.action_space_dim, device=cfg.device)
     is_first = torch.ones(cfg.num_workers, device=cfg.device)
     replay_reward = np.zeros(cfg.num_workers, dtype=np.float32)
-    replay_done = np.zeros(cfg.num_workers, dtype=bool)
+    replay_terminal = np.zeros(cfg.num_workers, dtype=bool)
+    replay_is_last = np.zeros(cfg.num_workers, dtype=bool)
     recurrent_state = None
     previous_stochastic = None
     iteration = 0
@@ -125,7 +126,7 @@ def train_dreamer():
             list_iterations_episode_length = []
             # random_action_fraction = 0.0
             replay_is_first = is_first.detach().cpu().numpy().astype(bool)
-            replay_is_terminal = replay_done.astype(bool, copy=True)
+            current_is_last = replay_is_last.astype(bool, copy=True)
             with torch.no_grad():
                 if recurrent_state is None or previous_stochastic is None:
                     context_stochastic, context_recurrent = world_model.rssm.initial_state(
@@ -174,6 +175,7 @@ def train_dreamer():
             #   The reward from the previous action that led to this state
             #   If the current observation is done/terminal??  # Yes
             #   The is_first flag for the current observation
+            #   the context_stochastic and context_recurrent are the latent states that led to the current observation, which will be used for training the world model and actor-critic networks.
             for i in range(cfg.num_workers):
                 obs_single = {
                     "vision": obs["vision"][i:i+1],
@@ -187,7 +189,8 @@ def train_dreamer():
                     obs_dict=obs_single,
                     action=action[i:i+1],
                     reward=replay_reward[i:i+1],
-                    done=replay_done[i:i+1],
+                    terminal=replay_terminal[i:i+1],
+                    is_last=replay_is_last[i:i+1],
                     is_first=bool(replay_is_first[i]),
                     context_stochastic=replay_context_stochastic[i:i+1],
                     context_recurrent=replay_context_recurrent[i:i+1],
@@ -195,7 +198,7 @@ def train_dreamer():
 
             # Step environment
             next_obs, rewards, terminations, truncations, infos = env.step(action)
-            done = terminations | truncations
+            episode_end = terminations | truncations
             # # TODO: Remove this
             # mean_action_distance_from_center = float(np.mean(np.abs(action - 0.5)))
             # action_std = float(np.std(action))
@@ -226,11 +229,13 @@ def train_dreamer():
                     )
 
             obs = next_obs
-            next_is_first = replay_is_terminal
+            next_is_first = current_is_last
             replay_reward = rewards.astype(np.float32, copy=True)
-            replay_done = done.astype(bool, copy=True)
+            replay_terminal = terminations.astype(bool, copy=True)
+            replay_is_last = episode_end.astype(bool, copy=True)
             replay_reward[next_is_first] = 0.0
-            replay_done[next_is_first] = False
+            replay_terminal[next_is_first] = False
+            replay_is_last[next_is_first] = False
 
             prev_action_np = action.copy()
             prev_action_np[next_is_first] = 0.0
@@ -294,13 +299,14 @@ def train_dreamer():
                         actions_batch,
                         prev_actions,
                         rewards_batch,
-                        dones_batch,
+                        terminals_batch,
+                        is_last_batch,
                         is_first_batch,
                         initial_stochastic,
                         initial_recurrent,
                     ) = prepare_sequence_batch(batch_data, cfg)
-                    total_replay_terminal_count += float(dones_batch.sum().item())
-                    total_replay_terminal_items += int(dones_batch.numel())
+                    total_replay_terminal_count += float(terminals_batch.sum().item())
+                    total_replay_terminal_items += int(terminals_batch.numel())
 
                     embed_batch = world_model.encode(obs_batch_flat).view(batch_size, seq_len, -1)
 
@@ -310,7 +316,7 @@ def train_dreamer():
                         world_model.reward_predictor,
                         world_model.continue_predictor,
                         prev_actions, actions_batch, embed_batch, obs_target, is_first_batch,
-                        rewards_batch, dones_batch, cfg,
+                        rewards_batch, terminals_batch, cfg,
                         initial_stochastic=initial_stochastic,
                         initial_recurrent=initial_recurrent,
                         return_latents=True,
@@ -340,18 +346,21 @@ def train_dreamer():
                     ac_batch_size = batch_size
                     ac_latents = wm_latents.detach()
                     ac_rewards = rewards_batch.detach()
-                    ac_dones = dones_batch.detach()
+                    ac_terminals = terminals_batch.detach()
+                    ac_is_last = is_last_batch.detach()
                     if ac_batch_size > cfg.imagine_batch_size:
                         take = slice(0, cfg.imagine_batch_size)
                         ac_batch_size = cfg.imagine_batch_size
                         ac_latents = ac_latents[take]
                         ac_rewards = ac_rewards[take]
-                        ac_dones = ac_dones[take]
+                        ac_terminals = ac_terminals[take]
+                        ac_is_last = ac_is_last[take]
 
                     start_count = seq_len if cfg.imagine_last == 0 else min(cfg.imagine_last, seq_len)
                     replay_latents = ac_latents[:, -start_count:].detach()
                     replay_rewards = ac_rewards[:, -start_count:].detach()
-                    replay_terminals = ac_dones[:, -start_count:].detach()
+                    replay_terminals = ac_terminals[:, -start_count:].detach()
+                    replay_last_rows = ac_is_last[:, -start_count:].detach()
                     init_latent = replay_latents.reshape(ac_batch_size * start_count, -1)
                     _, init_recurrent_state = world_model.rssm.split_feature(init_latent)
 
@@ -368,6 +377,7 @@ def train_dreamer():
                         'latents': replay_latents,
                         'rewards': replay_rewards,
                         'terminals': replay_terminals,
+                        'is_last': replay_last_rows,
                     }
 
                     actor_loss, critic_loss, ac_metrics = compute_actor_critic_loss(
@@ -411,6 +421,16 @@ def train_dreamer():
                         key: value / num_ac_updates
                         for key, value in total_ac_metrics.items()
                     }
+                if total_replay_terminal_items > 0:
+                    replay_terminal_rate = (
+                        total_replay_terminal_count / total_replay_terminal_items
+                    )
+                    logger.info(
+                        "ReplayTerminals=%d/%d (%.6f)",
+                        int(total_replay_terminal_count),
+                        total_replay_terminal_items,
+                        replay_terminal_rate,
+                    )
             avg_episode_length = (
                 sum(list_iterations_episode_length) / len(list_iterations_episode_length)
                 if list_iterations_episode_length

@@ -33,7 +33,8 @@ class SequenceReplayBuffer:
         self.observations = deque(maxlen=self.replay_capacity)
         self.actions = deque(maxlen=self.replay_capacity)
         self.rewards = deque(maxlen=self.replay_capacity)
-        self.dones = deque(maxlen=self.replay_capacity)
+        self.terminals = deque(maxlen=self.replay_capacity)
+        self.episode_ends = deque(maxlen=self.replay_capacity)
         self.episode_starts = deque(maxlen=self.replay_capacity)
         self.context_stochastics = deque(maxlen=self.replay_capacity)
         self.context_recurrents = deque(maxlen=self.replay_capacity)
@@ -41,7 +42,8 @@ class SequenceReplayBuffer:
         self._pending_observations = []
         self._pending_actions = []
         self._pending_rewards = []
-        self._pending_dones = []
+        self._pending_terminals = []
+        self._pending_episode_ends = []
         self._pending_episode_starts = []
         self._pending_context_stochastics = []
         self._pending_context_recurrents = []
@@ -51,15 +53,17 @@ class SequenceReplayBuffer:
         obs_dict,
         action,
         reward,
-        done,
+        terminal,
+        is_last,
         is_first=False,
         context_stochastic=None,
         context_recurrent=None,
     ):
-        """Add one worker transition.
+        """Add one worker-aligned replay row.
 
         Calls are expected in worker order. Once all workers for a timestep have
-        been added, the row is committed as [env0, env1, ...].
+        been added, the row is committed as [env0, env1, ...]. ``terminal`` is
+        a true absorbing end; ``is_last`` also includes time-limit truncations.
         """
         if len(self._pending_observations) >= self.num_workers:
             raise RuntimeError(
@@ -69,7 +73,8 @@ class SequenceReplayBuffer:
         self._pending_observations.append(obs_dict)
         self._pending_actions.append(action)
         self._pending_rewards.append(reward)
-        self._pending_dones.append(done)
+        self._pending_terminals.append(terminal)
+        self._pending_episode_ends.append(is_last)
         self._pending_episode_starts.append(is_first)
         self._pending_context_stochastics.append(context_stochastic)
         self._pending_context_recurrents.append(context_recurrent)
@@ -78,7 +83,8 @@ class SequenceReplayBuffer:
             self.observations.append(self._pending_observations)
             self.actions.append(self._pending_actions)
             self.rewards.append(self._pending_rewards)
-            self.dones.append(self._pending_dones)
+            self.terminals.append(self._pending_terminals)
+            self.episode_ends.append(self._pending_episode_ends)
             self.episode_starts.append(self._pending_episode_starts)
             self.context_stochastics.append(self._pending_context_stochastics)
             self.context_recurrents.append(self._pending_context_recurrents)
@@ -91,7 +97,8 @@ class SequenceReplayBuffer:
             self._pending_observations = []
             self._pending_actions = []
             self._pending_rewards = []
-            self._pending_dones = []
+            self._pending_terminals = []
+            self._pending_episode_ends = []
             self._pending_episode_starts = []
             self._pending_context_stochastics = []
             self._pending_context_recurrents = []
@@ -107,7 +114,8 @@ class SequenceReplayBuffer:
         action_sequences = []
         prev_action_sequences = []
         reward_sequences = []
-        done_sequences = []
+        terminal_sequences = []
+        is_last_sequences = []
         is_first_sequences = []
         context_stochastic_sequences = []
         context_recurrent_sequences = []
@@ -139,8 +147,13 @@ class SequenceReplayBuffer:
             reward_seq = [
                 self.rewards[start_idx + i][env_idx] for i in range(self.batch_length)
             ]
-            done_seq = [
-                self.dones[start_idx + i][env_idx] for i in range(self.batch_length)
+            terminal_seq = [
+                self.terminals[start_idx + i][env_idx]
+                for i in range(self.batch_length)
+            ]
+            is_last_seq = [
+                self.episode_ends[start_idx + i][env_idx]
+                for i in range(self.batch_length)
             ]
             is_first_seq = [
                 self.episode_starts[start_idx + i][env_idx]
@@ -161,7 +174,8 @@ class SequenceReplayBuffer:
             action_sequences.append(action_seq)
             prev_action_sequences.append(prev_action_seq)
             reward_sequences.append(reward_seq)
-            done_sequences.append(done_seq)
+            terminal_sequences.append(terminal_seq)
+            is_last_sequences.append(is_last_seq)
             is_first_sequences.append(is_first_seq)
             context_stochastic_sequences.append(context_stochastic_seq)
             context_recurrent_sequences.append(context_recurrent_seq)
@@ -172,7 +186,8 @@ class SequenceReplayBuffer:
             "actions": action_sequences,
             "prev_actions": prev_action_sequences,
             "rewards": reward_sequences,
-            "dones": done_sequences,
+            "terminals": terminal_sequences,
+            "is_last": is_last_sequences,
             "is_first": is_first_sequences,
             "context_stochastic": context_stochastic_sequences,
             "context_recurrent": context_recurrent_sequences,
