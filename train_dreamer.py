@@ -56,10 +56,8 @@ def train_dreamer():
     # Create actor-critic
     actor = ActorNetwork(cfg)
     actor.to(cfg.device)
-    actor = torch.compile(actor, dynamic=True)
     critic = CriticNetwork(cfg)
     critic.to(cfg.device)
-    critic = torch.compile(critic, dynamic=True)
     ema_critic = CriticNetwork(cfg)
     ema_critic.to(cfg.device)
     ema_critic.load_state_dict(critic.state_dict())
@@ -72,6 +70,8 @@ def train_dreamer():
         percentile_high=cfg.return_norm_percentile_high,
         device=cfg.device,
     )
+    actor = torch.compile(actor, dynamic=True)
+    critic = torch.compile(critic, dynamic=True)
     logger.info("Created actor, critic, and EMA critic networks")
 
     # Create model save timestamp
