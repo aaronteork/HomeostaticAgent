@@ -57,6 +57,11 @@ def train_ppo():
     global_step = 0
     episodes_finished = 0
     obs, info = env.reset()
+    # SyncVectorEnv uses next-step autoreset in this project. After an episode
+    # boundary, the next env.step() ignores that worker's action and only
+    # returns its reset observation. Keep the row for temporal alignment and
+    # truncation bootstrapping, but exclude it from PPO optimization.
+    reset_only = np.zeros(cfg.num_workers, dtype=bool)
     # PPO iterations
     with mlflow.start_run(run_name="PPO Training - " + dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")):
         mlflow.log_params(asdict(cfg))
@@ -80,8 +85,18 @@ def train_ppo():
                     raise RuntimeError("NaN/Inf detected in actions")
 
                 next_obs, rewards, terminations, truncations, infos = env.step(actions)
-                done = terminations | truncations
-                add_to_replay_buffer(replay_buffer, obs, actions, log_prob, rewards, done, value)
+                valid = ~reset_only
+                add_to_replay_buffer(
+                    replay_buffer,
+                    obs,
+                    actions,
+                    log_prob,
+                    rewards,
+                    terminations,
+                    truncations,
+                    valid,
+                    value,
+                )
 
                 # Debug check: log sample values on first step
                 if _ == 0:
@@ -91,7 +106,8 @@ def train_ppo():
 
                 # Next step and global step update
                 obs = next_obs
-                global_step += cfg.num_workers
+                global_step += int(valid.sum())
+                reset_only = (terminations | truncations).astype(bool, copy=True)
 
                 # Track metrics
                 if "_episode" in infos:
@@ -118,7 +134,9 @@ def train_ppo():
             trajectory_for_gae = {
                 "rewards": trajectory["rewards"].to(cfg.device),
                 "values": trajectory["values"].to(cfg.device),
-                "dones": trajectory["dones"].to(cfg.device),
+                "terminations": trajectory["terminated"].to(cfg.device),
+                "truncations": trajectory["truncated"].to(cfg.device),
+                "valid": trajectory["valid"].to(cfg.device),
             }
 
             # Reshape for GAE computation, then flatten back
@@ -127,24 +145,31 @@ def train_ppo():
                 rewards=trajectory_reshaped["rewards"],
                 values=trajectory_reshaped["values"],
                 next_obs=obs,
-                dones=trajectory_reshaped["dones"],
+                terminations=trajectory_reshaped["terminations"],
+                truncations=trajectory_reshaped["truncations"],
                 agent=agent,
                 gamma=cfg.gamma,
                 lam=cfg.gae_lambda
             )
 
             # Flatten advantages and returns back to [batch_size] for training
-            advantages = advantages.reshape(-1)
-            returns = returns.reshape(-1)
+            valid = trajectory_reshaped["valid"].reshape(-1).bool()
+            advantages = advantages.reshape(-1)[valid]
+            returns = returns.reshape(-1)[valid]
 
             # Normalize advantages
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            advantages = (advantages - advantages.mean()) / (
+                advantages.std(unbiased=False) + 1e-8
+            )
 
             # Use original flat trajectory for unpacking (keep on CPU to avoid indexing issues on CUDA)
-            obs_trajectory = trajectory["obs"]
-            actions = trajectory["actions"].cpu() if trajectory["actions"].is_cuda else trajectory["actions"]
-            old_log_probs = trajectory["log_probs"].cpu() if trajectory["log_probs"].is_cuda else trajectory["log_probs"]
-            old_values = trajectory["values"].squeeze(-1).cpu() if trajectory["values"].is_cuda else trajectory["values"].squeeze(-1)
+            valid_cpu = valid.cpu()
+            obs_trajectory = {
+                key: value[valid_cpu] for key, value in trajectory["obs"].items()
+            }
+            actions = trajectory["actions"][valid_cpu]
+            old_log_probs = trajectory["log_probs"][valid_cpu]
+            old_values = trajectory["values"].squeeze(-1)[valid_cpu]
             advantages = advantages.cpu() if advantages.is_cuda else advantages
             returns = returns.cpu() if returns.is_cuda else returns
 

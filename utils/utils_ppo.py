@@ -19,7 +19,17 @@ def create_replay_buffer(config):
     return replay_buffer
 
 
-def add_to_replay_buffer(replay_buffer, obs, action, log_prob, reward, done, value):
+def add_to_replay_buffer(
+    replay_buffer,
+    obs,
+    action,
+    log_prob,
+    reward,
+    terminated,
+    truncated,
+    valid,
+    value,
+):
     """
     Adds a flattened PPO batch to the replay buffer.
     Expects input shapes to be already flattened (batch_size, ...).
@@ -33,7 +43,9 @@ def add_to_replay_buffer(replay_buffer, obs, action, log_prob, reward, done, val
             "actions": action,
             "log_probs": log_prob,
             "rewards": reward,
-            "dones": done,
+            "terminated": terminated,
+            "truncated": truncated,
+            "valid": valid,
             "values": value,
         },
         batch_size=[batch_size],
@@ -42,7 +54,16 @@ def add_to_replay_buffer(replay_buffer, obs, action, log_prob, reward, done, val
     replay_buffer.extend(data)
 
 
-def compute_gae_from_buffer(rewards, values, next_obs, dones, agent, gamma=0.99, lam=0.95):
+def compute_gae_from_buffer(
+    rewards,
+    values,
+    next_obs,
+    terminations,
+    truncations,
+    agent,
+    gamma=0.99,
+    lam=0.95,
+):
     """
     Computes GAE on structured (rollout_steps, num_workers) trajectories.
 
@@ -50,7 +71,9 @@ def compute_gae_from_buffer(rewards, values, next_obs, dones, agent, gamma=0.99,
         rewards: Tensor (T, N)
         values: Tensor (T, N) or (T, N, 1)
         next_obs: Dictionary containing vision, proprioception, internal_state of shape (N, ...)
-        dones: Tensor (T, N)
+        terminations: Tensor (T, N), true absorbing terminals
+        truncations: Tensor (T, N), nonterminal episode boundaries such as
+            time limits
         agent: The model used to get the final 'next_value'
         gamma: Discount factor
         lam: GAE lambda
@@ -72,8 +95,8 @@ def compute_gae_from_buffer(rewards, values, next_obs, dones, agent, gamma=0.99,
     num_workers = rewards.shape[1] if len(rewards.shape) > 1 else 1
     lastgaelam = torch.zeros(num_workers, device=rewards.device, dtype=rewards.dtype)
 
-    # Convert dones to float if it's bool
-    dones = dones.float() if dones.dtype == torch.bool else dones
+    terminations = terminations.float()
+    truncations = truncations.float()
 
     # print(f"[DEBUG GAE] rewards shape: {rewards.shape}, values shape: {values.shape}, dones shape: {dones.shape}")
 
@@ -84,12 +107,19 @@ def compute_gae_from_buffer(rewards, values, next_obs, dones, agent, gamma=0.99,
         else:
             nextvalues = values[t + 1]
 
-        nextnonterminal = 1.0 - dones[t]
+        # A true terminal suppresses value bootstrapping. A time-limit
+        # truncation still bootstraps from its final observation, but both
+        # kinds of episode boundary stop the GAE trace from entering the next
+        # episode.
+        bootstrap_mask = 1.0 - terminations[t]
+        trace_mask = 1.0 - torch.maximum(terminations[t], truncations[t])
         # if t == rollout_steps - 1:
         #     print(f"[DEBUG GAE] t={t}: nextvalues shape={nextvalues.shape}, nextnonterminal shape={nextnonterminal.shape}, values[t] shape={values[t].shape}")
             
-        delta = rewards[t] + gamma * nextvalues * nextnonterminal - values[t]
-        advantages[t] = lastgaelam = delta + gamma * lam * nextnonterminal * lastgaelam
+        delta = rewards[t] + gamma * nextvalues * bootstrap_mask - values[t]
+        advantages[t] = lastgaelam = (
+            delta + gamma * lam * trace_mask * lastgaelam
+        )
         
     returns = advantages + values
     return advantages, returns
