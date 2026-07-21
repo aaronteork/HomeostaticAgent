@@ -32,7 +32,7 @@ def train_dreamer():
     logger.info("Starting Dreamer V3 training...")
 
     # Create mlflow
-    mlflow.set_tracking_uri("sqlite:///runs.db?timeout=500")
+    mlflow.set_tracking_uri("sqlite:///runs.db?timeout=50000")
     mlflow.set_experiment("HomoeostaticAgent")
 
     # Get config
@@ -421,16 +421,16 @@ def train_dreamer():
                         key: value / num_ac_updates
                         for key, value in total_ac_metrics.items()
                     }
-                if total_replay_terminal_items > 0:
-                    replay_terminal_rate = (
-                        total_replay_terminal_count / total_replay_terminal_items
-                    )
-                    logger.info(
-                        "ReplayTerminals=%d/%d (%.6f)",
-                        int(total_replay_terminal_count),
-                        total_replay_terminal_items,
-                        replay_terminal_rate,
-                    )
+                # if total_replay_terminal_items > 0:
+                #     replay_terminal_rate = (
+                #         total_replay_terminal_count / total_replay_terminal_items
+                #     )
+                #     logger.info(
+                #         "ReplayTerminals=%d/%d (%.6f)",
+                #         int(total_replay_terminal_count),
+                #         total_replay_terminal_items,
+                #         replay_terminal_rate,
+                #     )
             avg_episode_length = (
                 sum(list_iterations_episode_length) / len(list_iterations_episode_length)
                 if list_iterations_episode_length

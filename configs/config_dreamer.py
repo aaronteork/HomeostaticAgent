@@ -15,8 +15,8 @@ class DreamerConfig(EnvConfig):
     mlp_n_layers: int = 3
     batch_size: int = 16
     batch_length: int = 64
-    total_env_steps: int = 500_000
-    replay_ratio: int = 512   # Was originally 512 to follow the paper for visual control but reduced to speed things up
+    total_env_steps: int = 5_000_000
+    replay_ratio: int = 32   # Was originally 512 to follow the paper for visual control but reduced 32 to match Minecraft since one episode is quite long too (to decay)
     # total_updates: int = 1_000
     adam_eps: float = 1e-5
     laprop_eps: float = 1e-20
