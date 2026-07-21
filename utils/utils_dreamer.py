@@ -744,13 +744,24 @@ class PercentileEMANormalizer:
 
 class Ratio:
     """Reference-style scheduler for update-to-environment-step ratios.
-    The conversion to integers helps to determine if we need to train any batches"""
+    The conversion to integers helps to determine if we need to train any batches.
+
+    Call ``start(step)`` when a delayed training phase becomes eligible. This
+    establishes the scheduler baseline without retrospectively charging the
+    pre-training collection phase to the update budget.
+    """
 
     def __init__(self, ratio: float):
         if ratio < 0:
             raise ValueError(f"ratio must be non-negative, got {ratio}")
         self.ratio = ratio
         self.prev = None
+
+    def start(self, step: int) -> None:
+        """Establish the update-ratio baseline at ``step`` without updates."""
+        if step < 0:
+            raise ValueError(f"step must be non-negative, got {step}")
+        self.prev = step
 
     def __call__(self, step: int) -> int:
         if self.ratio == 0:

@@ -113,6 +113,7 @@ def train_dreamer():
     iteration = 0
     batch_steps = cfg.batch_size * cfg.batch_length
     should_train = Ratio(cfg.replay_ratio / (batch_steps))  # Removed frame skip from the denominator for now
+    replay_ratio_started = False
 
     with mlflow.start_run(run_name="Dreamer V3 Training - " + dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")):
         mlflow.log_params(asdict(cfg))
@@ -267,7 +268,13 @@ def train_dreamer():
             # replay_terminal_count = 0.0
             # replay_terminal_items = 0
             if len(replay_buffer) >= cfg.min_buffer_size_before_training:
-                train_batches_due = should_train(global_step)
+                if not replay_ratio_started:
+                    # Do not retrospectively schedule updates for the replay
+                    # collection phase before training became eligible.
+                    should_train.start(global_step)
+                    replay_ratio_started = True
+                else:
+                    train_batches_due = should_train(global_step)
 
             # ===== PHASE 2: World Model Training =====
             if len(replay_buffer) >= cfg.min_buffer_size_before_training and train_batches_due > 0:
