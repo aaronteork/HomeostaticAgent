@@ -91,6 +91,18 @@ def train_dreamer():
     critic_optimizer = LaProp(critic.parameters(), lr=cfg.laprop_lr, eps=cfg.laprop_eps, betas=(cfg.laprop_beta1, cfg.laprop_beta2))
     logger.info("Created optimizers")
 
+    # AMP only accelerates CUDA training. Keeping it disabled on CPU preserves
+    # the existing numerical path for development and test runs.
+    amp_enabled = cfg.use_amp and cfg.device.type == "cuda"
+    amp_scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    def amp_autocast():
+        return torch.autocast(
+            device_type=cfg.device.type,
+            dtype=torch.float16,
+            enabled=amp_enabled,
+        )
+    logger.info("CUDA AMP is %s", "enabled (float16)" if amp_enabled else "disabled")
+
     # # Learning rate schedulers
     # No need learning rate schedulers
     # total_train_updates = max(1, int(cfg.total_env_steps * cfg.replay_ratio / (cfg.batch_size * cfg.batch_length)))
@@ -228,6 +240,7 @@ def train_dreamer():
                         },
                         step=episodes_finished,
                     )
+                    logger.info(f"Episode finished at global step {global_step}: return={infos['episode']['r'][i]}, length={infos['episode']['l'][i]}, food_consumed={infos['food_consumed'][i]}, water_consumed={infos['water_consumed'][i]}, posture={infos['posture'][i]}, termination_reason={infos['termination_reason'][i]}, final_hunger={infos['hunger'][i]}, final_thirst={infos['thirst'][i]}")
 
             obs = next_obs
             next_is_first = current_is_last
@@ -315,25 +328,27 @@ def train_dreamer():
                     total_replay_terminal_count += float(terminals_batch.sum().item())
                     total_replay_terminal_items += int(terminals_batch.numel())
 
-                    embed_batch = world_model.encode(obs_batch_flat).view(batch_size, seq_len, -1)
+                    with amp_autocast():
+                        embed_batch = world_model.encode(obs_batch_flat).view(batch_size, seq_len, -1)
 
-                    wm_loss, wm_metrics, wm_latents = compute_world_model_loss(
-                        world_model.rssm,
-                        world_model.decoder,
-                        world_model.reward_predictor,
-                        world_model.continue_predictor,
-                        prev_actions, actions_batch, embed_batch, obs_target, is_first_batch,
-                        rewards_batch, terminals_batch, cfg,
-                        initial_stochastic=initial_stochastic,
-                        initial_recurrent=initial_recurrent,
-                        return_latents=True,
-                    )
+                        wm_loss, wm_metrics, wm_latents = compute_world_model_loss(
+                            world_model.rssm,
+                            world_model.decoder,
+                            world_model.reward_predictor,
+                            world_model.continue_predictor,
+                            prev_actions, actions_batch, embed_batch, obs_target, is_first_batch,
+                            rewards_batch, terminals_batch, cfg,
+                            initial_stochastic=initial_stochastic,
+                            initial_recurrent=initial_recurrent,
+                            return_latents=True,
+                        )
 
                     # Backprop the world-model loss now, but delay the
                     # optimizer step until actor-critic has used the same
                     # pre-update posterior states for imagination.
                     world_model_optimizer.zero_grad()
-                    wm_loss.backward()
+                    amp_scaler.scale(wm_loss).backward()
+                    amp_scaler.unscale_(world_model_optimizer)
                     agc(world_model.parameters())
                     # torch.nn.utils.clip_grad_norm_(world_model.parameters(), cfg.world_model_grad_norm_clip)
 
@@ -371,46 +386,52 @@ def train_dreamer():
                     init_latent = replay_latents.reshape(ac_batch_size * start_count, -1)
                     _, init_recurrent_state = world_model.rssm.split_feature(init_latent)
 
-                    imagined_trajectories = imagination_rollout(
-                        world_model.rssm,
-                        actor,
-                        world_model.reward_predictor,
-                        world_model.continue_predictor,
-                        init_latent, init_recurrent_state, cfg
-                    )
-                    imagined_trajectories['start_batch_size'] = ac_batch_size
-                    imagined_trajectories['start_count'] = start_count
-                    replay_trajectories = {
-                        'latents': replay_latents,
-                        'rewards': replay_rewards,
-                        'terminals': replay_terminals,
-                        'is_last': replay_last_rows,
-                    }
+                    with amp_autocast():
+                        imagined_trajectories = imagination_rollout(
+                            world_model.rssm,
+                            actor,
+                            world_model.reward_predictor,
+                            world_model.continue_predictor,
+                            init_latent, init_recurrent_state, cfg
+                        )
+                        imagined_trajectories['start_batch_size'] = ac_batch_size
+                        imagined_trajectories['start_count'] = start_count
+                        replay_trajectories = {
+                            'latents': replay_latents,
+                            'rewards': replay_rewards,
+                            'terminals': replay_terminals,
+                            'is_last': replay_last_rows,
+                        }
 
-                    actor_loss, critic_loss, ac_metrics = compute_actor_critic_loss(
-                        critic, ema_critic, imagined_trajectories, cfg, return_normalizer, replay_trajectories
-                    )
+                        actor_loss, critic_loss, ac_metrics = compute_actor_critic_loss(
+                            critic, ema_critic, imagined_trajectories, cfg, return_normalizer, replay_trajectories
+                        )
 
                     actor_optimizer.zero_grad()
-                    actor_loss.backward()
+                    amp_scaler.scale(actor_loss).backward()
+                    amp_scaler.unscale_(actor_optimizer)
                     agc(actor.parameters())
                     # torch.nn.utils.clip_grad_norm_(
                     #         actor.parameters(), cfg.actor_grad_norm_clip
                     #     )
 
                     critic_optimizer.zero_grad()
-                    critic_loss.backward()
+                    amp_scaler.scale(critic_loss).backward()
+                    amp_scaler.unscale_(critic_optimizer)
                     agc(critic.parameters())
                     # torch.nn.utils.clip_grad_norm_(critic.parameters(), cfg.critic_grad_norm_clip)
                     # critic_scheduler.step()
 
-                    world_model_optimizer.step()
+                    amp_scaler.step(world_model_optimizer)
                     # world_model_scheduler.step()
-                    actor_optimizer.step()
+                    amp_scaler.step(actor_optimizer)
                     # actor_scheduler.step()
-                    critic_optimizer.step()
+                    amp_scaler.step(critic_optimizer)
+                    amp_scaler.update()
 
-                    replay_buffer.update_contexts(batch_data, wm_latents.detach())
+                    # Persist contexts in float32 so replay does not gradually
+                    # accumulate fp16 rounding error across updates.
+                    replay_buffer.update_contexts(batch_data, wm_latents.detach().float())
 
                     for param, ema_param in zip(critic.parameters(), ema_critic.parameters()):
                         ema_param.data.copy_(cfg.ema_critic_tau * param.data + (1.0 - cfg.ema_critic_tau) * ema_param.data)

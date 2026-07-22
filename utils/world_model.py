@@ -717,7 +717,7 @@ class ContinuePredictor(nn.Module):
         super().__init__()
         self.config = config
         self.net = MLP(config, input_dim=config.latent_dim, output_dim=config.hidden_dim, num_layers=1)
-        self.continue_projection = nn.Sequential(nn.Linear(config.hidden_dim, 1), nn.Sigmoid())
+        self.continue_projection = nn.Linear(config.hidden_dim, 1)
         self._init_weights()
 
     def _init_weights(self):
@@ -733,6 +733,10 @@ class ContinuePredictor(nn.Module):
 
     def forward(self, latent):
         """Predict continuation probability from latent state."""
+        return torch.sigmoid(self.forward_logits(latent))
+
+    def forward_logits(self, latent):
+        """Predict continuation logits for numerically stable training losses."""
         latent = to_tensor(latent, self.config.device)
         return self.continue_projection(self.net(latent))
 

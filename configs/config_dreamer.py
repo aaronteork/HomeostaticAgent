@@ -23,6 +23,7 @@ class DreamerConfig(EnvConfig):
     laprop_beta1: float = 0.9
     laprop_beta2: float = 0.99
     laprop_lr: float = 4e-5
+    use_amp: bool = True
     two_hot_bins: int = 255
     two_hot_high: float = 20.0
     two_hot_low: float = -20.0

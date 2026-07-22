@@ -244,12 +244,17 @@ def compute_world_model_loss(
     # ===== Continue Prediction Loss =====
     # DreamerV3 predicts continuation, and with contdisc enabled it predicts the
     # discounted continuation used directly in lambda returns.
-    predicted_continue = continue_predictor(latent)  # (batch, seq_len, 1)
+    # BCE on sigmoid probabilities is not autocast-safe. Train directly from
+    # logits, while the predictor's normal forward path continues to expose
+    # probabilities for imagination and diagnostics.
+    predicted_continue_logits = continue_predictor.forward_logits(latent)
     terminal_target = terminal.contiguous().view(batch_size, seq_len, 1).float()
     continue_target = 1.0 - terminal_target
     if config.contdisc:
         continue_target = continue_target * config.discount
-    continue_loss = F.binary_cross_entropy(predicted_continue, continue_target)
+    continue_loss = F.binary_cross_entropy_with_logits(
+        predicted_continue_logits, continue_target
+    )
     # ===== Combined Loss with Weighting =====
     loss = (
         recon_loss
@@ -301,6 +306,8 @@ def imagination_rollout(
     DreamerV3, actor learning uses a REINFORCE-style surrogate with stopped
     imagined returns, so gradients should flow through the actor log-probs and
     entropy terms, not through predicted dynamics, rewards, or terminals.
+
+    Imagined rewards and continues is not for the latent on the same index, but the one after
 
     Args:
         rssm: RSSM model
