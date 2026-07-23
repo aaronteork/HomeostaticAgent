@@ -216,32 +216,6 @@ def train_dreamer():
             # mean_action_distance_from_center = float(np.mean(np.abs(action - 0.5)))
             # action_std = float(np.std(action))
 
-            # Log finished episodes and carry the step outcome to the next
-            # replay row, where it is aligned with the resulting observation.
-            # When the current replay row was terminal, this vector step returns
-            # the reset observation; that next row should be first with zero
-            # reward/done, not another terminal transition.
-            # episode_global_step = global_step + cfg.num_workers
-            for i in range(cfg.num_workers):
-                if "_episode" in infos and infos["_episode"][i]:
-                    episodes_finished += 1
-                    list_iterations_episode_length.append(infos["episode"]["l"][i])
-                    mlflow.log_metrics(
-                        {
-                            "episode/return": infos["episode"]["r"][i],
-                            "episode/length": infos["episode"]["l"][i],
-                            "episode/food_consumed": infos["food_consumed"][i],
-                            "episode/water_consumed": infos["water_consumed"][i],
-                            "episode/posture": infos["posture"][i],
-                            "episode/termination_reason": infos["termination_reason"][i],
-                            "episode/final_hunger": infos["hunger"][i],
-                            "episode/final_thirst": infos["thirst"][i],
-                            'global_step': global_step,
-                        },
-                        step=episodes_finished,
-                    )
-                    logger.info(f"Episode finished at global step {global_step}: return={infos['episode']['r'][i]}, length={infos['episode']['l'][i]}, food_consumed={infos['food_consumed'][i]}, water_consumed={infos['water_consumed'][i]}, posture={infos['posture'][i]}, termination_reason={infos['termination_reason'][i]}, final_hunger={infos['hunger'][i]}, final_thirst={infos['thirst'][i]}")
-
             obs = next_obs
             next_is_first = current_is_last
             replay_reward = rewards.astype(np.float32, copy=True)
@@ -464,27 +438,41 @@ def train_dreamer():
                 if list_iterations_episode_length
                 else 0.0
             )
-            train_metrics = {
-                "global_step": global_step,
-                "train/average_episode_length": avg_episode_length,
-                "train/episodes_finished": episodes_finished,
-            }
-            if actor_loss_value is not None and critic_loss_value is not None:
-                train_metrics.update(
-                    {
-                        "train/policy_loss": actor_loss_value,
-                        "train/value_loss": critic_loss_value,
-                        "train/entropy": ac_metrics.get("actor_critic/entropy", 0.0),
-                        "train/learning_rate": actor_optimizer.param_groups[0]["lr"],
-                        # "train/kl_divergence": 0.0,
-                        "train/dyn_loss": wm_metrics.get("world_model/dyn_loss", 0.0),
-                        "train/rep_loss": wm_metrics.get("world_model/rep_loss", 0.0),
-                        "train/explained_variance": ac_metrics.get(
-                            "actor_critic/explained_variance", 0.0
-                        ),
-                    }
-                )
-            mlflow.log_metrics(train_metrics, step=global_step)
+
+            # Log finished episodes and carry the step outcome to the next
+            # replay row, where it is aligned with the resulting observation.
+            # When the current replay row was terminal, this vector step returns
+            # the reset observation; that next row should be first with zero
+            # reward/done, not another terminal transition.
+            # episode_global_step = global_step + cfg.num_workers
+            for i in range(cfg.num_workers):
+                if "_episode" in infos and infos["_episode"][i]:
+                    episodes_finished += 1
+                    list_iterations_episode_length.append(infos["episode"]["l"][i])
+                    mlflow.log_metrics(
+                        {
+                            "episode/return": infos["episode"]["r"][i],
+                            "episode/length": infos["episode"]["l"][i],
+                            "episode/food_consumed": infos["food_consumed"][i],
+                            "episode/water_consumed": infos["water_consumed"][i],
+                            "episode/posture": infos["posture"][i],
+                            "episode/termination_reason": infos["termination_reason"][i],
+                            "episode/final_hunger": infos["hunger"][i],
+                            "episode/final_thirst": infos["thirst"][i],
+                            "train/policy_loss": actor_loss_value,
+                            "train/value_loss": critic_loss_value,
+                            "train/entropy": ac_metrics.get("actor_critic/entropy", 0.0),
+                            "train/learning_rate": actor_optimizer.param_groups[0]["lr"],
+                            # "train/kl_divergence": 0.0,
+                            "train/dyn_loss": wm_metrics.get("world_model/dyn_loss", 0.0),
+                            "train/rep_loss": wm_metrics.get("world_model/rep_loss", 0.0),
+                            "train/explained_variance": ac_metrics.get("actor_critic/explained_variance", 0.0),
+                            'global_step': global_step,
+                        },
+                        step=episodes_finished,
+                    )
+
+                    logger.info(f"Episode finished at global step {global_step}: return={infos['episode']['r'][i]}, length={infos['episode']['l'][i]}, food_consumed={infos['food_consumed'][i]}, water_consumed={infos['water_consumed'][i]}, posture={infos['posture'][i]}, termination_reason={infos['termination_reason'][i]}, final_hunger={infos['hunger'][i]}, final_thirst={infos['thirst'][i]}")
             iteration += 1
             
             if global_step % 100_000 == 0 and global_step > 0:
