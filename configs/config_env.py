@@ -9,7 +9,7 @@ class EnvConfig(BaseConfig):
     env_name: str = "HomeostaticAntEnv"
     max_steps: int = 60_000
     image_size: tuple[int, int] = (64, 64)
-    num_workers: int = 10
+    num_workers: int = 20
     arena_size: float = 6.0
     day_night_cycle_len: int = 1
     object_spacing: float = 2.0

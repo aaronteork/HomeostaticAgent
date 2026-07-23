@@ -99,7 +99,7 @@ def create_env(config, multiple_env=False):
         def make_env():
             env = _base_env_setup()
             return env
-        env = gym.vector.SyncVectorEnv([make_env for _ in range(config.num_workers)])
+        env = gym.vector.AsyncVectorEnv([make_env for _ in range(config.num_workers)])
         return env
 
     # Return the single environment (without NumpyToTorch as per your original code)
