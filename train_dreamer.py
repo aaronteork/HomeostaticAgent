@@ -449,28 +449,35 @@ def train_dreamer():
                 if "_episode" in infos and infos["_episode"][i]:
                     episodes_finished += 1
                     list_iterations_episode_length.append(infos["episode"]["l"][i])
-                    mlflow.log_metrics(
-                        {
-                            "episode/return": infos["episode"]["r"][i],
-                            "episode/length": infos["episode"]["l"][i],
-                            "episode/food_consumed": infos["food_consumed"][i],
-                            "episode/water_consumed": infos["water_consumed"][i],
-                            "episode/posture": infos["posture"][i],
-                            "episode/termination_reason": infos["termination_reason"][i],
-                            "episode/final_hunger": infos["hunger"][i],
-                            "episode/final_thirst": infos["thirst"][i],
-                            "train/policy_loss": actor_loss_value,
-                            "train/value_loss": critic_loss_value,
-                            "train/entropy": ac_metrics.get("actor_critic/entropy", 0.0),
-                            "train/learning_rate": actor_optimizer.param_groups[0]["lr"],
-                            # "train/kl_divergence": 0.0,
-                            "train/dyn_loss": wm_metrics.get("world_model/dyn_loss", 0.0),
-                            "train/rep_loss": wm_metrics.get("world_model/rep_loss", 0.0),
-                            "train/explained_variance": ac_metrics.get("actor_critic/explained_variance", 0.0),
-                            'global_step': global_step,
-                        },
-                        step=episodes_finished,
-                    )
+                    episode_metrics = {
+                        "episode/return": infos["episode"]["r"][i],
+                        "episode/length": infos["episode"]["l"][i],
+                        "episode/food_consumed": infos["food_consumed"][i],
+                        "episode/water_consumed": infos["water_consumed"][i],
+                        "episode/posture": infos["posture"][i],
+                        "episode/termination_reason": infos["termination_reason"][i],
+                        "episode/final_hunger": infos["hunger"][i],
+                        "episode/final_thirst": infos["thirst"][i],
+                        "global_step": global_step,
+                    }
+                    # Episodes can finish while replay is still warming up.
+                    # In that phase actor_loss_value and critic_loss_value are
+                    # intentionally None because no training update has run;
+                    # MLflow does not accept None as a metric value.
+                    if num_ac_updates > 0:
+                        episode_metrics.update(
+                            {
+                                "train/policy_loss": actor_loss_value,
+                                "train/value_loss": critic_loss_value,
+                                "train/entropy": ac_metrics.get("actor_critic/entropy", 0.0),
+                                "train/learning_rate": actor_optimizer.param_groups[0]["lr"],
+                                # "train/kl_divergence": 0.0,
+                                "train/dyn_loss": wm_metrics.get("world_model/dyn_loss", 0.0),
+                                "train/rep_loss": wm_metrics.get("world_model/rep_loss", 0.0),
+                                "train/explained_variance": ac_metrics.get("actor_critic/explained_variance", 0.0),
+                            }
+                        )
+                    mlflow.log_metrics(episode_metrics, step=episodes_finished)
 
                     logger.info(f"Episode finished at global step {global_step}: return={infos['episode']['r'][i]}, length={infos['episode']['l'][i]}, food_consumed={infos['food_consumed'][i]}, water_consumed={infos['water_consumed'][i]}, posture={infos['posture'][i]}, termination_reason={infos['termination_reason'][i]}, final_hunger={infos['hunger'][i]}, final_thirst={infos['thirst'][i]}")
             iteration += 1

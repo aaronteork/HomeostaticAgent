@@ -540,8 +540,8 @@ def compute_actor_critic_loss(
     last_latent = latent_sequence[:, -1]
 
     with torch.no_grad():
-        current_values = ema_critic(latents.detach()).mean.squeeze(-1)
-        bootstrap = ema_critic(last_latent.detach()).mean.squeeze(-1)
+        current_values = critic(latents.detach()).mean.squeeze(-1)
+        bootstrap = critic(last_latent.detach()).mean.squeeze(-1)
         critic_returns = compute_lambda_returns_from_continues(
             rewards=rewards.detach(),
             values=current_values,
