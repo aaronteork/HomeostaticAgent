@@ -197,9 +197,9 @@ def compute_world_model_loss(
     # This is a simpler way of doing compared to SheepRL's implementation which has a MSEDistribution
     reconstructed_obs = decoder(latent)
     recon_losses = {
-        key: F.mse_loss(reconstructed_obs[key], obs[key])
+        key: F.mse_loss(reconstructed_obs[key], obs[key], reduction="none").sum(dim=(-3, -2, -1)).mean()
         if key == "vision"
-        else F.mse_loss(reconstructed_obs[key], symlog(obs[key]))
+        else F.mse_loss(reconstructed_obs[key], symlog(obs[key]), reduction="none").sum(dim=-1).mean()
         for key in reconstructed_obs.keys()
     }
     recon_loss = (

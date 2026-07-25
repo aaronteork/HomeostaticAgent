@@ -15,7 +15,7 @@ class DreamerConfig(EnvConfig):
     mlp_n_layers: int = 3
     batch_size: int = 16
     batch_length: int = 64
-    total_env_steps: int = 10_000_000
+    total_env_steps: int = 5_000_000
     replay_ratio: int = 32   # Was originally 512 to follow the paper for visual control but reduced 32 to match Minecraft since one episode is quite long too (to decay)
     # total_updates: int = 1_000
     adam_eps: float = 1e-5
@@ -30,7 +30,7 @@ class DreamerConfig(EnvConfig):
 
     # Replay buffer parameters
     # replay_scaling: int = 64
-    replay_capacity: int = 5_000_000  # paper is originally 5e6
+    replay_capacity: int = 3_000_000  # paper is originally 5e6
     min_buffer_size_before_training: int | None = None
 
     # World model loss
