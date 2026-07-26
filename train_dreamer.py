@@ -141,18 +141,6 @@ def train_dreamer():
             replay_is_first = is_first.detach().cpu().numpy().astype(bool)
             current_is_last = replay_is_last.astype(bool, copy=True)
             with torch.no_grad():
-                if recurrent_state is None or previous_stochastic is None:
-                    context_stochastic, context_recurrent = world_model.rssm.initial_state(
-                        cfg.num_workers,
-                        cfg.device,
-                        deterministic=False,
-                    )
-                else:
-                    context_stochastic = previous_stochastic
-                    context_recurrent = recurrent_state
-                replay_context_stochastic = context_stochastic.detach().cpu().numpy()
-                replay_context_recurrent = context_recurrent.detach().cpu().numpy()
-
                 # Embed observations
                 obs_tensor = obs_to_tensor_dict(obs, cfg)
                 obs_embed = world_model.encode(obs_tensor)
@@ -166,8 +154,11 @@ def train_dreamer():
                     previous_stochastic=previous_stochastic,
                     deterministic=False,
                 )
-                # I think previous stochastic here is already z_t
                 previous_stochastic, recurrent_state = world_model.rssm.split_feature(latent)
+                # Official replay entries are posterior states *after* observing
+                # this row. They form the one-row context prefix for later chunks.
+                replay_context_stochastic = previous_stochastic.detach().cpu().numpy()
+                replay_context_recurrent = recurrent_state.detach().cpu().numpy()
 
                 # Get action from actor
                 action, log_prob, dist = actor(latent, deterministic=False)
@@ -188,7 +179,7 @@ def train_dreamer():
             #   The reward from the previous action that led to this state
             #   If the current observation is done/terminal??  # Yes
             #   The is_first flag for the current observation
-            #   the context_stochastic and context_recurrent are the latent states that led to the current observation, which will be used for training the world model and actor-critic networks.
+            #   Posterior RSSM entry after observing the current observation.
             for i in range(cfg.num_workers):
                 obs_single = {
                     "vision": obs["vision"][i:i+1],

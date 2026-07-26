@@ -68,8 +68,19 @@ def reshape_sequence_observations(obs_flat, batch_size, seq_len):
 def prepare_sequence_batch(batch_data, cfg):
     batch_size = len(batch_data["obs"])
     seq_len = cfg.batch_length
+    context_len = cfg.replay_context
+    stored_seq_len = seq_len + context_len
+    if len(batch_data["obs"][0]) != stored_seq_len:
+        raise ValueError(
+            f"expected replay sequence length {stored_seq_len}, got {len(batch_data['obs'][0])}"
+        )
     obs_batch_flat = stack_sequence_observations(batch_data["obs"], cfg)
-    obs_target = reshape_sequence_observations(obs_batch_flat, batch_size, seq_len)
+    obs_target_full = reshape_sequence_observations(
+        obs_batch_flat, batch_size, stored_seq_len
+    )
+    obs_target = {
+        key: value[:, context_len:] for key, value in obs_target_full.items()
+    }
 
     actions = torch.stack(
         [
@@ -77,47 +88,48 @@ def prepare_sequence_batch(batch_data, cfg):
             for seq in batch_data["actions"]
             for action in seq
         ]
-    ).view(batch_size, seq_len, -1)
-    rewards = torch.stack(
+    ).view(batch_size, stored_seq_len, -1)
+    rewards_full = torch.stack(
         [
             to_tensor(reward, cfg.device).reshape(())
             for seq in batch_data["rewards"]
             for reward in seq
         ]
-    ).view(batch_size, seq_len)
-    terminals = to_tensor(
+    ).view(batch_size, stored_seq_len)
+    terminals_full = to_tensor(
         np.asarray(batch_data["terminals"]).squeeze(-1), cfg.device
     )
-    is_last = to_tensor(np.asarray(batch_data["is_last"]).squeeze(-1), cfg.device)
-    is_first = to_tensor(np.asarray(batch_data["is_first"]), cfg.device)
+    is_last_full = to_tensor(
+        np.asarray(batch_data["is_last"]).squeeze(-1), cfg.device
+    )
+    is_first_full = to_tensor(np.asarray(batch_data["is_first"]), cfg.device)
 
-    if "prev_actions" in batch_data:
-        prev_actions = torch.stack(
-            [
-                to_tensor(action, cfg.device).squeeze(0)
-                for seq in batch_data["prev_actions"]
-                for action in seq
-            ]
-        ).view(batch_size, seq_len, -1)
+    if context_len:
+        prev_actions = actions[:, context_len - 1 : -1]
     else:
         prev_actions = torch.zeros_like(actions)
         prev_actions[:, 1:] = actions[:, :-1]
+    actions = actions[:, context_len:]
+    rewards = rewards_full[:, context_len:]
+    terminals = terminals_full[:, context_len:]
+    is_last = is_last_full[:, context_len:]
+    is_first = is_first_full[:, context_len:]
 
     reset_mask = 1.0 - is_first
     prev_actions = prev_actions * reset_mask.unsqueeze(-1)
 
     initial_stochastic = None
     initial_recurrent = None
-    if "context_stochastic" in batch_data and "context_recurrent" in batch_data:
+    if context_len and "context_stochastic" in batch_data and "context_recurrent" in batch_data:
         initial_stochastic = torch.stack(
             [
-                to_tensor(seq[0], cfg.device).squeeze(0)
+                to_tensor(seq[context_len - 1], cfg.device).squeeze(0)
                 for seq in batch_data["context_stochastic"]
             ]
         )
         initial_recurrent = torch.stack(
             [
-                to_tensor(seq[0], cfg.device).squeeze(0)
+                to_tensor(seq[context_len - 1], cfg.device).squeeze(0)
                 for seq in batch_data["context_recurrent"]
             ]
         )

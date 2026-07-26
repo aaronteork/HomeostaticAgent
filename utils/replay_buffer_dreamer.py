@@ -23,6 +23,8 @@ class SequenceReplayBuffer:
         # Maximum time steps per worker to store, ensuring total capacity is as specified in config
         self.replay_capacity = max(1, config.replay_capacity // self.num_workers)
         self.batch_length = config.batch_length
+        self.replay_context = config.replay_context
+        self.sequence_length = self.batch_length + self.replay_context
         self.batch_size = config.batch_size
         self._rng = np.random.default_rng()
         self._total_rows_committed = 0
@@ -89,8 +91,8 @@ class SequenceReplayBuffer:
             self.context_stochastics.append(self._pending_context_stochastics)
             self.context_recurrents.append(self._pending_context_recurrents)
             self._total_rows_committed += 1
-            if self._total_rows_committed % self.batch_length == 0:
-                start_abs = self._total_rows_committed - self.batch_length
+            if self._total_rows_committed % self.sequence_length == 0:
+                start_abs = self._total_rows_committed - self.sequence_length
                 for env_idx in range(self.num_workers):
                     self._online_queue.append((start_abs, env_idx))
 
@@ -124,13 +126,13 @@ class SequenceReplayBuffer:
         for start_idx, env_idx in zip(start_indices, env_indices):
             obs_seq = [
                 self.observations[start_idx + i][env_idx]
-                for i in range(self.batch_length)
+                for i in range(self.sequence_length)
             ]
             action_seq = [
-                self.actions[start_idx + i][env_idx] for i in range(self.batch_length)
+                self.actions[start_idx + i][env_idx] for i in range(self.sequence_length)
             ]
             prev_action_seq = []
-            for i in range(self.batch_length):
+            for i in range(self.sequence_length):
                 item_idx = start_idx + i
                 if force_first_reset and i == 0:
                     prev_action = np.zeros_like(self.actions[item_idx][env_idx])
@@ -145,27 +147,27 @@ class SequenceReplayBuffer:
                     prev_action = self.actions[item_idx - 1][env_idx]
                 prev_action_seq.append(prev_action)
             reward_seq = [
-                self.rewards[start_idx + i][env_idx] for i in range(self.batch_length)
+                self.rewards[start_idx + i][env_idx] for i in range(self.sequence_length)
             ]
             terminal_seq = [
                 self.terminals[start_idx + i][env_idx]
-                for i in range(self.batch_length)
+                for i in range(self.sequence_length)
             ]
             is_last_seq = [
                 self.episode_ends[start_idx + i][env_idx]
-                for i in range(self.batch_length)
+                for i in range(self.sequence_length)
             ]
             is_first_seq = [
                 self.episode_starts[start_idx + i][env_idx]
-                for i in range(self.batch_length)
+                for i in range(self.sequence_length)
             ]
             context_stochastic_seq = [
                 self.context_stochastics[start_idx + i][env_idx]
-                for i in range(self.batch_length)
+                for i in range(self.sequence_length)
             ]
             context_recurrent_seq = [
                 self.context_recurrents[start_idx + i][env_idx]
-                for i in range(self.batch_length)
+                for i in range(self.sequence_length)
             ]
             if force_first_reset:
                 is_first_seq[0] = True
@@ -179,7 +181,8 @@ class SequenceReplayBuffer:
             is_first_sequences.append(is_first_seq)
             context_stochastic_sequences.append(context_stochastic_seq)
             context_recurrent_sequences.append(context_recurrent_seq)
-            replay_indices.append((int(start_idx), int(env_idx)))
+            oldest_abs = self._total_rows_committed - len(self.observations)
+            replay_indices.append((int(oldest_abs + start_idx), int(env_idx)))
 
         return {
             "obs": obs_sequences,
@@ -200,11 +203,11 @@ class SequenceReplayBuffer:
         if (
             batch_size <= 0
             or len(self) < self.config.min_buffer_size_before_training
-            or time_len < self.batch_length
+            or time_len < self.sequence_length
         ):
             return None
 
-        max_start = time_len - self.batch_length + 1
+        max_start = time_len - self.sequence_length + 1
         start_indices = [
             int(self._rng.integers(0, max_start)) for _ in range(batch_size)
         ]
@@ -219,7 +222,7 @@ class SequenceReplayBuffer:
     def _sample_online(self, batch_size):
         """Pop fresh complete chunks once before falling back to uniform replay."""
         time_len = len(self.observations)
-        if batch_size <= 0 or time_len < self.batch_length:
+        if batch_size <= 0 or time_len < self.sequence_length:
             return None
 
         oldest_abs = self._total_rows_committed - time_len
@@ -229,7 +232,7 @@ class SequenceReplayBuffer:
         while self._online_queue and len(starts) < batch_size:
             start_abs, env_idx = self._online_queue.popleft()
             start_idx = start_abs - oldest_abs
-            if start_idx < 0 or start_idx + self.batch_length > time_len:
+            if start_idx < 0 or start_idx + self.sequence_length > time_len:
                 continue
             starts.append(start_idx)
             envs.append(env_idx)
@@ -261,7 +264,7 @@ class SequenceReplayBuffer:
         return self._merge_batches([online_batch, replay_batch])
 
     def update_contexts(self, batch_data, latents):
-        """Write refreshed posterior RSSM states back as context for later items."""
+        """Refresh post-prefix RSSM entries by stable absolute replay row ID."""
         if batch_data is None or "replay_indices" not in batch_data:
             return
         stochastic_states, recurrent_states = (
@@ -280,26 +283,18 @@ class SequenceReplayBuffer:
         recurrent_states = recurrent_states.numpy()
 
         time_len = len(self.observations)
-        for batch_idx, (start_idx, env_idx) in enumerate(batch_data["replay_indices"]):
-            for offset in range(1, self.batch_length):
-                target_idx = start_idx + offset
-                if target_idx >= time_len:
-                    break
-                if self.episode_starts[target_idx][env_idx]:
+        oldest_abs = self._total_rows_committed - time_len
+        for batch_idx, (start_abs, env_idx) in enumerate(batch_data["replay_indices"]):
+            for offset in range(self.batch_length):
+                target_abs = start_abs + self.replay_context + offset
+                target_idx = target_abs - oldest_abs
+                if target_idx < 0 or target_idx >= time_len:
                     continue
                 self.context_stochastics[target_idx][env_idx] = stochastic_states[
-                    batch_idx, offset - 1
+                    batch_idx, offset
                 ].copy()
                 self.context_recurrents[target_idx][env_idx] = recurrent_states[
-                    batch_idx, offset - 1
-                ].copy()
-            next_idx = start_idx + self.batch_length
-            if next_idx < time_len and not self.episode_starts[next_idx][env_idx]:
-                self.context_stochastics[next_idx][env_idx] = stochastic_states[
-                    batch_idx, -1
-                ].copy()
-                self.context_recurrents[next_idx][env_idx] = recurrent_states[
-                    batch_idx, -1
+                    batch_idx, offset
                 ].copy()
 
     def __len__(self):

@@ -331,8 +331,6 @@ class RSSM(nn.Module):
         self.stochastic_size = config.stochastic_units * config.discrete_classes
         self.feature_dim = config.latent_dim
         self.unimix = config.rssm_unimix
-        self.initial_recurrent_state = nn.Parameter(torch.zeros(self.recurrent_units))
-
         self.gru = BlockGRUCell(
             deter_size=self.recurrent_units,
             stoch_size=self.stochastic_size,
@@ -401,14 +399,14 @@ class RSSM(nn.Module):
     def initial_state(
         self, batch_size: int, device, dtype=torch.float32, deterministic: bool = False
     ) -> Tuple[Tensor, Tensor]:
-        """Get the initial stochastic and recurrent states for a batch of sequences.
-        Initial stochastic state is derived from the recurrent state."""
-        recurrent_state = torch.tanh(self.initial_recurrent_state).to(
-            device=device, dtype=dtype
+        """Return the fixed zero RSSM state used at episode and replay starts."""
+        recurrent_state = torch.zeros(
+            batch_size, self.recurrent_units, device=device, dtype=dtype
         )
-        recurrent_state = recurrent_state.unsqueeze(0).expand(batch_size, -1)
-        logits = self.prior_logits(recurrent_state)
-        stochastic_state = self._sample_stochastic(logits, deterministic=deterministic)
+        stochastic_state = torch.zeros(
+            batch_size, self.stochastic_units, self.discrete_classes,
+            device=device, dtype=dtype,
+        )
         return stochastic_state, recurrent_state
 
     def _feature(self, stochastic_state: Tensor, recurrent_state: Tensor) -> Tensor:

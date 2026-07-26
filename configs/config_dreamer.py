@@ -5,7 +5,7 @@ from configs.config_env import EnvConfig
 @dataclass(frozen=True, kw_only=True)
 class DreamerConfig(EnvConfig):
     # Model parameters
-    hidden_dim: int = 64
+    hidden_dim: int = 256
     stochastic_units: int = 32
 
     rssm_unimix: float = 0.01
@@ -31,6 +31,7 @@ class DreamerConfig(EnvConfig):
     # Replay buffer parameters
     # replay_scaling: int = 64
     replay_capacity: int = 3_000_000  # paper is originally 5e6
+    replay_context: int = 1
     min_buffer_size_before_training: int | None = None
 
     # World model loss
@@ -77,6 +78,8 @@ class DreamerConfig(EnvConfig):
     gae_lambda: float = 0.95
 
     def __post_init__(self):
+        if self.replay_context < 0:
+            raise ValueError("replay_context must be non-negative")
         if self.min_buffer_size_before_training is None:
             object.__setattr__(
                 self,
