@@ -74,12 +74,21 @@ def prepare_sequence_batch(batch_data, cfg):
         raise ValueError(
             f"expected replay sequence length {stored_seq_len}, got {len(batch_data['obs'][0])}"
         )
-    obs_batch_flat = stack_sequence_observations(batch_data["obs"], cfg)
+    obs_batch_full_flat = stack_sequence_observations(batch_data["obs"], cfg)
     obs_target_full = reshape_sequence_observations(
-        obs_batch_flat, batch_size, stored_seq_len
+        obs_batch_full_flat, batch_size, stored_seq_len
     )
     obs_target = {
         key: value[:, context_len:] for key, value in obs_target_full.items()
+    }
+    # The replay context only restores the RSSM state and supplies the first
+    # previous action. It is not part of the world-model loss sequence. Keep
+    # the encoder input aligned with the post-context targets; otherwise
+    # flattening B * (T + context) rows and reshaping them as B * T silently
+    # inflates the embedding dimension (for example 1536 -> 1560 at T=64).
+    obs_batch_flat = {
+        key: value.reshape(batch_size * seq_len, *value.shape[2:])
+        for key, value in obs_target.items()
     }
 
     actions = torch.stack(
