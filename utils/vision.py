@@ -14,19 +14,19 @@ class VisionEncoder(nn.Module):
         # 1. Feature Extraction: 4-stage hierarchy
         self.convnet = nn.Sequential(
             nn.Conv2d(input_channels, depth * 2, kernel_size=4, stride=2, padding=1, bias=False),
-            LayerNormChannelLast(depth * 2),
+            RMSNormChannelLast(depth * 2),
             nn.SiLU(),
             
             nn.Conv2d(depth * 2, depth * 3, kernel_size=4, stride=2, padding=1, bias=False),
-            LayerNormChannelLast(depth * 3),
+            RMSNormChannelLast(depth * 3),
             nn.SiLU(),
             
             nn.Conv2d(depth * 3, depth * 4, kernel_size=4, stride=2, padding=1, bias=False),
-            LayerNormChannelLast(depth * 4),
+            RMSNormChannelLast(depth * 4),
             nn.SiLU(),
             
             nn.Conv2d(depth * 4, depth * 4, kernel_size=4, stride=2, padding=1, bias=False),
-            LayerNormChannelLast(depth * 4),
+            RMSNormChannelLast(depth * 4),
             nn.SiLU(),
             nn.Flatten()
         )
@@ -56,22 +56,22 @@ class VisionDecoder(nn.Module):
         self.convnet = nn.Sequential(
             # Stage 4 -> 3
             nn.ConvTranspose2d(depth * 4, depth * 4, kernel_size=4, stride=2, padding=1, bias=False),
-            LayerNormChannelLast(depth * 4),
+            RMSNormChannelLast(depth * 4),
             nn.SiLU(),            
             
             # Stage 3 -> 2
             nn.ConvTranspose2d(depth * 4, depth * 3, kernel_size=4, stride=2, padding=1, bias=False),
-            LayerNormChannelLast(depth * 3),
+            RMSNormChannelLast(depth * 3),
             nn.SiLU(),
             
             # Stage 2 -> 1
             nn.ConvTranspose2d(depth * 3, depth * 2, kernel_size=4, stride=2, padding=1, bias=False),
-            LayerNormChannelLast(depth * 2),
+            RMSNormChannelLast(depth * 2),
             nn.SiLU(),
             
             # Stage 1 -> Output
             nn.ConvTranspose2d(depth * 2, output_channels, kernel_size=4, stride=2, padding=1, bias=False),
-            # LayerNormChannelLast(output_channels),
+            # RMSNormChannelLast(output_channels),
             # nn.SiLU(),
             
             # Add in a sigmoid activation to ensure output is in [0, 1] range for image reconstruction
@@ -100,3 +100,16 @@ class LayerNormChannelLast(nn.LayerNorm):
         x = super().forward(x)
         x = x.permute(0, 3, 1, 2)
         return x.to(input_dtype)
+
+
+class RMSNormChannelLast(nn.RMSNorm):
+    """Edited from SheepRL but for RMSNorm to standardise normalisation throughout Dreamer"""
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+    def forward(self, x):
+        if x.dim() != 4:
+            raise ValueError(f"Input tensor must be 4D (NCHW), received {len(x.shape)}D instead: {x.shape}")
+        input_dtype = x.dtype
+        x = x.permute(0, 2, 3, 1)
+        x = super().forward(x)
+        return x.permute(0, 3, 1, 2).to(input_dtype)
