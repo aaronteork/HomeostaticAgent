@@ -12,8 +12,7 @@ from torch.distributions import (
 
 from configs.config_dreamer import DreamerConfig
 from utils.utils_dreamer import (
-    TwoHotEncodingDistribution,
-    symexp,
+    symexp_twohot,
     symlog,
     to_tensor,
 )
@@ -652,7 +651,7 @@ class CriticNetwork(nn.Module):
             latent: (batch, latent_dim) or (batch, seq_len, latent_dim)
 
         Returns:
-            TwoHotEncodingDistribution over scalar values.
+            TwoHot over scalar values.
         """
         if len(latent.shape) == 3:
             batch_size, seq_len, latent_dim = latent.shape
@@ -668,12 +667,7 @@ class CriticNetwork(nn.Module):
         if squeeze_output:
             logits = logits.view(batch_size, seq_len, -1)
 
-        return TwoHotEncodingDistribution(
-            logits,
-            dims=1,
-            low=self.config.two_hot_low,
-            high=self.config.two_hot_high,
-        )
+        return symexp_twohot(logits, self.config.two_hot_bins)
 
 
 class RewardPredictor(nn.Module):
@@ -700,12 +694,7 @@ class RewardPredictor(nn.Module):
         latent = to_tensor(latent, self.config.device)
         latent = self.net(latent)
         logits = self.reward_projection(latent)
-        return TwoHotEncodingDistribution(
-            logits,
-            dims=1,
-            low=self.config.two_hot_low,
-            high=self.config.two_hot_high,
-        )
+        return symexp_twohot(logits, self.config.two_hot_bins)
 
 
 class ContinuePredictor(nn.Module):

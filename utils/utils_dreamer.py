@@ -19,12 +19,27 @@ def to_tensor(value, device, dtype=torch.float32):
     return torch.as_tensor(value, device=device, dtype=dtype)
 
 
+# From https://github.com/NM512/r2dreamer/blob/546e4fab8146ea4b14e1d7726bbc1a8a1d50322f/distributions.py
 def to_f32(x):
     return x.to(dtype=torch.float32)
 
 
+# From https://github.com/NM512/r2dreamer/blob/546e4fab8146ea4b14e1d7726bbc1a8a1d50322f/distributions.py
 def to_i32(x):
     return x.to(dtype=torch.int32)
+
+
+# From https://github.com/NM512/r2dreamer/blob/546e4fab8146ea4b14e1d7726bbc1a8a1d50322f/distributions.py
+def symexp_twohot(logits, bin_num, **kwargs):
+    if bin_num % 2 == 1:
+        half = torch.linspace(-20, 0, (bin_num - 1) // 2 + 1, dtype=torch.float32, device=logits.device)
+        half = symexp(half)
+        bins = torch.concatenate([half, -half[:-1].flip(dims=(0,))], 0)
+    else:
+        half = torch.linspace(-20, 0, bin_num // 2, dtype=torch.float32, device=logits.device)
+        half = symexp(half)
+        bins = torch.concatenate([half, -half.flip(dims=(0,))], 0)
+    return TwoHot(to_f32(logits), bins)
 
 
 # From https://github.com/Eclectic-Sheep/sheeprl/blob/main/sheeprl/utils/utils.py
@@ -389,7 +404,7 @@ def imagination_rollout(
 
             imagined_latents.append(latent)
             reward_dist = reward_predictor(latent)
-            imagined_rewards.append(reward_dist.mean.squeeze(-1))
+            imagined_rewards.append(reward_dist.mode.squeeze(-1))
             continue_head_output = continue_predictor(latent)
             if config.contdisc:
                 continue_factor = continue_head_output
@@ -505,7 +520,7 @@ def compute_replay_value_loss(
     is_last = replay_trajectories["is_last"].detach()
 
     with torch.no_grad():
-        values = ema_critic(latents).mean.squeeze(-1)
+        values = ema_critic(latents).mode.squeeze(-1)
         replay_returns, discount_weights = compute_replay_lambda_returns(
             rewards,
             values,
@@ -520,7 +535,7 @@ def compute_replay_value_loss(
         discount_weights * value_dist.log_prob(replay_returns.unsqueeze(-1))
     ).mean()
     with torch.no_grad():
-        ema_values = ema_critic(latents[:, :-1]).mean
+        ema_values = ema_critic(latents[:, :-1]).mode
     replay_slow_loss = -(
         discount_weights * value_dist.log_prob(ema_values.detach())
     ).mean()
@@ -571,8 +586,8 @@ def compute_actor_critic_loss(
     last_latent = latent_sequence[:, -1]
 
     with torch.no_grad():
-        current_values = critic(latents.detach()).mean.squeeze(-1)
-        bootstrap = critic(last_latent.detach()).mean.squeeze(-1)
+        current_values = critic(latents.detach()).mode.squeeze(-1)
+        bootstrap = critic(last_latent.detach()).mode.squeeze(-1)
         critic_returns = compute_lambda_returns_from_continues(
             rewards=rewards.detach(),
             values=current_values,
@@ -613,7 +628,7 @@ def compute_actor_critic_loss(
     critic_return_loss = -(
         discount_weights * value_dist.log_prob(critic_returns.unsqueeze(-1))
     ).mean()
-    predicted_values = value_dist.mean.squeeze(-1)
+    predicted_values = value_dist.mode.squeeze(-1)
     returns_var = torch.var(critic_returns)
     if returns_var.item() < 1e-10:
         explained_variance = 0.0
@@ -622,7 +637,7 @@ def compute_actor_critic_loss(
             1.0 - torch.var(critic_returns - predicted_values) / returns_var
         ).item()
     with torch.no_grad():
-        ema_values = ema_critic(latents.detach()).mean
+        ema_values = ema_critic(latents.detach()).mode
     critic_slow_loss = -(
         discount_weights * value_dist.log_prob(ema_values.detach())
     ).mean()
@@ -746,6 +761,7 @@ class TwoHot:
         self.squash = squash if squash is not None else (lambda x: x)
         self.unsquash = unsquash if unsquash is not None else (lambda x: x)
 
+    @property
     def mode(self):
         # (..., N_bins), (N_bins,) -> (..., 1)
         n = self.logits.shape[-1]
