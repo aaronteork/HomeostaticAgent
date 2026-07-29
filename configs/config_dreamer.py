@@ -21,8 +21,9 @@ class DreamerConfig(EnvConfig):
     adam_eps: float = 1e-5
     laprop_eps: float = 1e-20
     laprop_beta1: float = 0.9
-    laprop_beta2: float = 0.99
+    laprop_beta2: float = 0.999
     laprop_lr: float = 4e-5
+    warmup_steps: int = 1000
     use_amp: bool = True
     two_hot_bins: int = 255
     two_hot_high: float = 20.0
@@ -35,7 +36,7 @@ class DreamerConfig(EnvConfig):
     min_buffer_size_before_training: int | None = None
 
     # World model loss
-    world_model_grad_norm_clip: float = 1000.0
+    # world_model_grad_norm_clip: float = 1000.0
     vision_reconstruction_weight: float = 1.0
     proprioception_reconstruction_weight: float = 1.0
     internal_state_reconstruction_weight: float = 1.0
@@ -51,7 +52,7 @@ class DreamerConfig(EnvConfig):
     imagine_last: int = 0
     imagine_batch_size: int = 16
     # world_model_grad_steps_per_update: int = 1
-    world_model_lr: float = 1e-4
+    # world_model_lr: float = 1e-4
     ent_coef: float = 3e-4
     return_norm_rate: float = 0.01
     return_norm_limit: float = 1.0
@@ -59,11 +60,11 @@ class DreamerConfig(EnvConfig):
     return_norm_percentile_high: float = 95.0
 
     # Actor and critic
-    actor_lr: float = 3e-5
+    # actor_lr: float = 3e-5
     # actor_critic_grad_steps_per_update: int = 1
-    actor_grad_norm_clip: float = 100.0
+    # actor_grad_norm_clip: float = 100.0
 
-    critic_lr: float = 3e-5
+    # critic_lr: float = 3e-5
     ema_critic_tau: float = 0.02
     critic_slow_regularization: float = 1.0
     critic_imagined_loss: float = 1.0

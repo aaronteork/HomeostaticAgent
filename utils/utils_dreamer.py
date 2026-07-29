@@ -19,6 +19,14 @@ def to_tensor(value, device, dtype=torch.float32):
     return torch.as_tensor(value, device=device, dtype=dtype)
 
 
+def to_f32(x):
+    return x.to(dtype=torch.float32)
+
+
+def to_i32(x):
+    return x.to(dtype=torch.int32)
+
+
 # From https://github.com/Eclectic-Sheep/sheeprl/blob/main/sheeprl/utils/utils.py
 # From https://github.com/danijar/dreamerv3/blob/8fa35f83eee1ce7e10f3dee0b766587d0a713a60/dreamerv3/jaxutils.py
 def symlog(x: Tensor) -> Tensor:
@@ -489,7 +497,9 @@ def compute_replay_lambda_returns(
 def compute_replay_value_loss(
     critic, ema_critic, replay_trajectories, bootstrap, config: DreamerConfig
 ):
-    latents = replay_trajectories["latents"].detach()
+    # Let replay-value prediction shape the posterior encoder/RSSM features.
+    # Replay targets and environment labels remain detached below.
+    latents = replay_trajectories["latents"]
     rewards = replay_trajectories["rewards"].detach()
     terminals = replay_trajectories["terminals"].detach()
     is_last = replay_trajectories["is_last"].detach()
@@ -723,6 +733,71 @@ class TwoHotEncodingDistribution:
         log_pred = self.logits - torch.logsumexp(self.logits, dim=-1, keepdims=True)
         return (target * log_pred).sum(dim=self.dims)
 
+
+# From https://github.com/NM512/r2dreamer/blob/546e4fab8146ea4b14e1d7726bbc1a8a1d50322f/distributions.py
+class TwoHot:
+    def __init__(self, logits, bins, squash=None, unsquash=None):
+        # (..., N_bins), (N_bins,)
+        self.logits = to_f32(logits)
+        assert self.logits.shape[-1] == len(bins), (self.logits.shape, len(bins))
+
+        self.bins = bins
+        self.probs = F.softmax(self.logits, dim=-1)  # (..., N_bins)
+        self.squash = squash if squash is not None else (lambda x: x)
+        self.unsquash = unsquash if unsquash is not None else (lambda x: x)
+
+    def mode(self):
+        # (..., N_bins), (N_bins,) -> (..., 1)
+        n = self.logits.shape[-1]
+        if n % 2 == 1:
+            m = (n - 1) // 2
+            p1 = self.probs[..., :m]
+            p2 = self.probs[..., m : m + 1]
+            p3 = self.probs[..., m + 1 :]
+            b1 = self.bins[..., :m]
+            b2 = self.bins[..., m : m + 1]
+            b3 = self.bins[..., m + 1 :]
+            wavg = (p2 * b2).sum(dim=-1, keepdim=True) + ((p1 * b1).flip(dims=(-1,)) + (p3 * b3)).sum(
+                dim=-1, keepdim=True
+            )
+            return self.unsquash(wavg)
+        p1 = self.probs[..., : n // 2]
+        p2 = self.probs[..., n // 2 :]
+        b1 = self.bins[..., : n // 2]
+        b2 = self.bins[..., n // 2 :]
+        wavg = ((p1 * b1).flip(dims=(-1,)) + (p2 * b2)).sum(dim=-1, keepdim=True)
+        return self.unsquash(wavg)
+
+    def log_prob(self, target):
+        # (..., 1)
+        assert target.dtype == self.probs.dtype
+        target = target.squeeze(-1)  # (...,)
+        target_squashed = self.squash(target).detach()  # (...,)
+        # below/above: (...,)
+        below = to_i32(self.bins <= target_squashed.unsqueeze(-1)).sum(dim=-1) - 1
+        above = len(self.bins) - to_i32(self.bins > target_squashed.unsqueeze(-1)).sum(dim=-1)
+        below = torch.clamp(below, 0, len(self.bins) - 1)
+        above = torch.clamp(above, 0, len(self.bins) - 1)
+        equal = below == above
+        dist_to_below = torch.where(
+            equal,
+            torch.tensor(1.0, device=target.device, dtype=torch.float32),
+            (self.bins[below] - target_squashed).abs(),
+        )
+        dist_to_above = torch.where(
+            equal,
+            torch.tensor(1.0, device=target.device, dtype=torch.float32),
+            (self.bins[above] - target_squashed).abs(),
+        )
+        total = dist_to_below + dist_to_above
+        weight_below = dist_to_above / total
+        weight_above = dist_to_below / total
+        oh_below = to_f32(F.one_hot(below, num_classes=len(self.bins)))
+        oh_above = to_f32(F.one_hot(above, num_classes=len(self.bins)))
+        # (..., N_bins)
+        mixed_target = oh_below * weight_below.unsqueeze(-1) + oh_above * weight_above.unsqueeze(-1)
+        log_pred = self.logits - torch.logsumexp(self.logits, dim=-1, keepdim=True)  # (..., N_bins)
+        return (mixed_target * log_pred).sum(dim=-1)  # (...)
 
 class PercentileEMANormalizer:
     """DreamerV3-style percentile EMA normalizer for imagined returns."""

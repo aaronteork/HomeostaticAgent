@@ -1,28 +1,29 @@
 import datetime as dt
 from dataclasses import asdict
 
-import numpy as np
 import mlflow
+import numpy as np
 import torch
+from torch.optim.lr_scheduler import LinearLR
 
 from configs.config_dreamer import DreamerConfig
-from utils.laprop import LaProp
 from utils.agc import agc
-from utils.utils_env import create_env
-from utils.utils_logger import create_logger
-from utils.world_model import WorldModel, ActorNetwork, CriticNetwork
+from utils.laprop import LaProp
 from utils.replay_buffer_dreamer import SequenceReplayBuffer
 from utils.utils_dreamer import (
     PercentileEMANormalizer,
-    compute_world_model_loss,
-    compute_actor_critic_loss,
-    imagination_rollout,
-    to_tensor,
     Ratio,
+    compute_actor_critic_loss,
+    compute_world_model_loss,
+    imagination_rollout,
+    obs_to_tensor_dict,
     prepare_sequence_batch,
     set_requires_grad,
-    obs_to_tensor_dict,
+    to_tensor,
 )
+from utils.utils_env import create_env
+from utils.utils_logger import create_logger
+from utils.world_model import ActorNetwork, CriticNetwork, WorldModel
 
 
 def train_dreamer():
@@ -38,9 +39,11 @@ def train_dreamer():
     # Get config
     cfg = DreamerConfig()
     logger.info(f"Config: {cfg}")
-    
+
     # Check that the config does not have frame stack key
-    assert not hasattr(cfg, "frame_stack_key"), "DreamerConfig should not have frame_stack_key attribute"
+    assert not hasattr(cfg, "frame_stack_key"), (
+        "DreamerConfig should not have frame_stack_key attribute"
+    )
 
     # Create environment
     env = create_env(cfg, multiple_env=True)
@@ -48,7 +51,7 @@ def train_dreamer():
     logger.info(f"Created parallel environment with {cfg.num_workers} workers")
 
     # Create world model
-    torch.set_float32_matmul_precision('high') 
+    torch.set_float32_matmul_precision("high")
     world_model = WorldModel(cfg).to(cfg.device)
     world_model = torch.compile(world_model, dynamic=True)
     logger.info("Created world model")
@@ -75,7 +78,7 @@ def train_dreamer():
     logger.info("Created actor, critic, and EMA critic networks")
 
     # Create model save timestamp
-    timestamp = dt.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    timestamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     model_path_world_model = f"./models/dreamer_world_model_{timestamp}.pt"
     model_path_actor = f"./models/dreamer_actor_{timestamp}.pt"
     model_path_critic = f"./models/dreamer_critic_{timestamp}.pt"
@@ -84,31 +87,34 @@ def train_dreamer():
     replay_buffer = SequenceReplayBuffer(cfg, device=cfg.device)
     logger.info("Created replay buffer")
 
-    # Create optimizers
-    # Stick to Adam for simplicity, the paper mentioned that they used some LaProp and adaptive global gradient clipping to stabilise training
-    world_model_optimizer = LaProp(world_model.parameters(), lr=cfg.laprop_lr, eps=cfg.laprop_eps, betas=(cfg.laprop_beta1, cfg.laprop_beta2))
-    actor_optimizer = LaProp(actor.parameters(), lr=cfg.laprop_lr, eps=cfg.laprop_eps, betas=(cfg.laprop_beta1, cfg.laprop_beta2))
-    critic_optimizer = LaProp(critic.parameters(), lr=cfg.laprop_lr, eps=cfg.laprop_eps, betas=(cfg.laprop_beta1, cfg.laprop_beta2))
-    logger.info("Created optimizers")
+    # Use one optimizer for the combined Dreamer objective. Replay-value
+    # gradients can then update both the critic and posterior representation.
+    optimizer = LaProp(
+        list(world_model.parameters())
+        + list(actor.parameters())
+        + list(critic.parameters()),
+        lr=cfg.laprop_lr,
+        eps=cfg.laprop_eps,
+        betas=(cfg.laprop_beta1, cfg.laprop_beta2),
+    )
+    logger.info("Created joint world-model, actor, and critic optimizer")
+    scheduler = LinearLR(
+        optimizer, start_factor=0.001, end_factor=1.0, total_iters=cfg.warmup_steps
+    )
 
     # AMP only accelerates CUDA training. Keeping it disabled on CPU preserves
     # the existing numerical path for development and test runs.
     amp_enabled = cfg.use_amp and cfg.device.type == "cuda"
     amp_scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+
     def amp_autocast():
         return torch.autocast(
             device_type=cfg.device.type,
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             enabled=amp_enabled,
         )
-    logger.info("CUDA AMP is %s", "enabled (float16)" if amp_enabled else "disabled")
 
-    # # Learning rate schedulers
-    # No need learning rate schedulers
-    # total_train_updates = max(1, int(cfg.total_env_steps * cfg.replay_ratio / (cfg.batch_size * cfg.batch_length)))
-    # world_model_scheduler = LinearLR(world_model_optimizer, start_factor=1.0, end_factor=0.1, total_iters=total_train_updates)
-    # actor_scheduler = LinearLR(actor_optimizer, start_factor=1.0, end_factor=0.1, total_iters=total_train_updates)
-    # critic_scheduler = LinearLR(critic_optimizer, start_factor=1.0, end_factor=0.1, total_iters=total_train_updates)
+    logger.info("CUDA AMP is %s", "enabled (bfloat16)" if amp_enabled else "disabled")
 
     # Training
     logger.info("Starting training loop")
@@ -124,10 +130,15 @@ def train_dreamer():
     previous_stochastic = None
     iteration = 0
     batch_steps = cfg.batch_size * cfg.batch_length
-    should_train = Ratio(cfg.replay_ratio / (batch_steps))  # Removed frame skip from the denominator for now
+    should_train = Ratio(
+        cfg.replay_ratio / (batch_steps)
+    )  # Removed frame skip from the denominator for now
     replay_ratio_started = False
 
-    with mlflow.start_run(run_name="Dreamer V3 Training - " + dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")):
+    with mlflow.start_run(
+        run_name="Dreamer V3 Training - "
+        + dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    ):
         mlflow.log_params(asdict(cfg))
 
         while global_step < cfg.total_env_steps:
@@ -154,7 +165,9 @@ def train_dreamer():
                     previous_stochastic=previous_stochastic,
                     deterministic=False,
                 )
-                previous_stochastic, recurrent_state = world_model.rssm.split_feature(latent)
+                previous_stochastic, recurrent_state = world_model.rssm.split_feature(
+                    latent
+                )
                 # Official replay entries are posterior states *after* observing
                 # this row. They form the one-row context prefix for later chunks.
                 replay_context_stochastic = previous_stochastic.detach().cpu().numpy()
@@ -166,7 +179,9 @@ def train_dreamer():
 
                 # Check for NaN
                 if np.any(np.isnan(action)) or np.any(np.isinf(action)):
-                    logger.error(f"NaN/Inf detected in actions at iteration {iteration}!")
+                    logger.error(
+                        f"NaN/Inf detected in actions at iteration {iteration}!"
+                    )
                     raise RuntimeError("NaN/Inf detected in actions")
 
             # Store the current replay row before stepping, matching the official
@@ -174,7 +189,7 @@ def train_dreamer():
             # reward/done that led into obs_t from action_{t-1}. The replay
             # buffer reconstructs prev_action_t by shifting stored actions.
             # Stores the following:
-            #   Current observation 
+            #   Current observation
             #   Action taken because of the current observation
             #   The reward from the previous action that led to this state
             #   If the current observation is done/terminal??  # Yes
@@ -182,22 +197,22 @@ def train_dreamer():
             #   Posterior RSSM entry after observing the current observation.
             for i in range(cfg.num_workers):
                 obs_single = {
-                    "vision": obs["vision"][i:i+1],
-                    "proprioception": obs["proprioception"][i:i+1],
-                    "internal_state": obs["internal_state"][i:i+1],
+                    "vision": obs["vision"][i : i + 1],
+                    "proprioception": obs["proprioception"][i : i + 1],
+                    "internal_state": obs["internal_state"][i : i + 1],
                 }
                 if cfg.num_heat > 0:
-                    obs_single["heat_sensor"] = obs["heat_sensor"][i:i+1]
+                    obs_single["heat_sensor"] = obs["heat_sensor"][i : i + 1]
 
                 replay_buffer.add(
                     obs_dict=obs_single,
-                    action=action[i:i+1],
-                    reward=replay_reward[i:i+1],
-                    terminal=replay_terminal[i:i+1],
-                    is_last=replay_is_last[i:i+1],
+                    action=action[i : i + 1],
+                    reward=replay_reward[i : i + 1],
+                    terminal=replay_terminal[i : i + 1],
+                    is_last=replay_is_last[i : i + 1],
                     is_first=bool(replay_is_first[i]),
-                    context_stochastic=replay_context_stochastic[i:i+1],
-                    context_recurrent=replay_context_recurrent[i:i+1],
+                    context_stochastic=replay_context_stochastic[i : i + 1],
+                    context_recurrent=replay_context_recurrent[i : i + 1],
                 )
 
             # Step environment
@@ -255,7 +270,10 @@ def train_dreamer():
                     train_batches_due = should_train(global_step)
 
             # ===== PHASE 2: World Model Training =====
-            if len(replay_buffer) >= cfg.min_buffer_size_before_training and train_batches_due > 0:
+            if (
+                len(replay_buffer) >= cfg.min_buffer_size_before_training
+                and train_batches_due > 0
+            ):
                 logger.debug(f"Iteration {iteration}: Starting world model training")
                 world_model.train()
 
@@ -294,28 +312,27 @@ def train_dreamer():
                     total_replay_terminal_items += int(terminals_batch.numel())
 
                     with amp_autocast():
-                        embed_batch = world_model.encode(obs_batch_flat).view(batch_size, seq_len, -1)
+                        embed_batch = world_model.encode(obs_batch_flat).view(
+                            batch_size, seq_len, -1
+                        )
 
                         wm_loss, wm_metrics, wm_latents = compute_world_model_loss(
                             world_model.rssm,
                             world_model.decoder,
                             world_model.reward_predictor,
                             world_model.continue_predictor,
-                            prev_actions, actions_batch, embed_batch, obs_target, is_first_batch,
-                            rewards_batch, terminals_batch, cfg,
+                            prev_actions,
+                            actions_batch,
+                            embed_batch,
+                            obs_target,
+                            is_first_batch,
+                            rewards_batch,
+                            terminals_batch,
+                            cfg,
                             initial_stochastic=initial_stochastic,
                             initial_recurrent=initial_recurrent,
                             return_latents=True,
                         )
-
-                    # Backprop the world-model loss now, but delay the
-                    # optimizer step until actor-critic has used the same
-                    # pre-update posterior states for imagination.
-                    world_model_optimizer.zero_grad()
-                    amp_scaler.scale(wm_loss).backward()
-                    amp_scaler.unscale_(world_model_optimizer)
-                    agc(world_model.parameters())
-                    # torch.nn.utils.clip_grad_norm_(world_model.parameters(), cfg.world_model_grad_norm_clip)
 
                     total_wm_loss += wm_loss.item()
                     # total_reconstruction_loss += wm_metrics['world_model/reconstruction_loss']
@@ -331,25 +348,36 @@ def train_dreamer():
                     critic.train()
 
                     ac_batch_size = batch_size
-                    ac_latents = wm_latents.detach()
+                    replay_source_latents = wm_latents
                     ac_rewards = rewards_batch.detach()
                     ac_terminals = terminals_batch.detach()
                     ac_is_last = is_last_batch.detach()
                     if ac_batch_size > cfg.imagine_batch_size:
                         take = slice(0, cfg.imagine_batch_size)
                         ac_batch_size = cfg.imagine_batch_size
-                        ac_latents = ac_latents[take]
+                        replay_source_latents = replay_source_latents[take]
                         ac_rewards = ac_rewards[take]
                         ac_terminals = ac_terminals[take]
                         ac_is_last = ac_is_last[take]
 
-                    start_count = seq_len if cfg.imagine_last == 0 else min(cfg.imagine_last, seq_len)
-                    replay_latents = ac_latents[:, -start_count:].detach()
-                    replay_rewards = ac_rewards[:, -start_count:].detach()
-                    replay_terminals = ac_terminals[:, -start_count:].detach()
-                    replay_last_rows = ac_is_last[:, -start_count:].detach()
-                    init_latent = replay_latents.reshape(ac_batch_size * start_count, -1)
-                    _, init_recurrent_state = world_model.rssm.split_feature(init_latent)
+                    start_count = (
+                        seq_len
+                        if cfg.imagine_last == 0
+                        else min(cfg.imagine_last, seq_len)
+                    )
+                    # Replay value learning remains connected to the posterior
+                    # representation. Imagination starts stay detached, which
+                    # preserves the official ac_grads=False behavior.
+                    replay_latents = replay_source_latents[:, -start_count:]
+                    replay_rewards = ac_rewards[:, -start_count:]
+                    replay_terminals = ac_terminals[:, -start_count:]
+                    replay_last_rows = ac_is_last[:, -start_count:]
+                    init_latent = replay_latents.detach().reshape(
+                        ac_batch_size * start_count, -1
+                    )
+                    _, init_recurrent_state = world_model.rssm.split_feature(
+                        init_latent
+                    )
 
                     with amp_autocast():
                         imagined_trajectories = imagination_rollout(
@@ -357,49 +385,56 @@ def train_dreamer():
                             actor,
                             world_model.reward_predictor,
                             world_model.continue_predictor,
-                            init_latent, init_recurrent_state, cfg
+                            init_latent,
+                            init_recurrent_state,
+                            cfg,
                         )
-                        imagined_trajectories['start_batch_size'] = ac_batch_size
-                        imagined_trajectories['start_count'] = start_count
+                        imagined_trajectories["start_batch_size"] = ac_batch_size
+                        imagined_trajectories["start_count"] = start_count
                         replay_trajectories = {
-                            'latents': replay_latents,
-                            'rewards': replay_rewards,
-                            'terminals': replay_terminals,
-                            'is_last': replay_last_rows,
+                            "latents": replay_latents,
+                            "rewards": replay_rewards,
+                            "terminals": replay_terminals,
+                            "is_last": replay_last_rows,
                         }
 
                         actor_loss, critic_loss, ac_metrics = compute_actor_critic_loss(
-                            critic, ema_critic, imagined_trajectories, cfg, return_normalizer, replay_trajectories
+                            critic,
+                            ema_critic,
+                            imagined_trajectories,
+                            cfg,
+                            return_normalizer,
+                            replay_trajectories,
                         )
 
-                    actor_optimizer.zero_grad()
-                    amp_scaler.scale(actor_loss).backward()
-                    amp_scaler.unscale_(actor_optimizer)
+                    optimizer.zero_grad()
+                    total_loss = wm_loss + actor_loss + critic_loss
+                    amp_scaler.scale(total_loss).backward()
+                    amp_scaler.unscale_(optimizer)
+
+                    # Retain component-wise AGC statistics with the joint
+                    # optimizer.
+                    agc(world_model.parameters())
                     agc(actor.parameters())
-                    # torch.nn.utils.clip_grad_norm_(
-                    #         actor.parameters(), cfg.actor_grad_norm_clip
-                    #     )
-
-                    critic_optimizer.zero_grad()
-                    amp_scaler.scale(critic_loss).backward()
-                    amp_scaler.unscale_(critic_optimizer)
                     agc(critic.parameters())
-                    # torch.nn.utils.clip_grad_norm_(critic.parameters(), cfg.critic_grad_norm_clip)
-                    # critic_scheduler.step()
 
-                    amp_scaler.step(world_model_optimizer)
-                    # world_model_scheduler.step()
-                    amp_scaler.step(actor_optimizer)
-                    # actor_scheduler.step()
-                    amp_scaler.step(critic_optimizer)
+                    amp_scaler.step(optimizer)
                     amp_scaler.update()
+                    scheduler.step()
 
                     # Persist contexts in float32 so replay does not gradually
                     # accumulate fp16 rounding error across updates.
-                    replay_buffer.update_contexts(batch_data, wm_latents.detach().float())
+                    replay_buffer.update_contexts(
+                        batch_data, wm_latents.detach().float()
+                    )
 
-                    for param, ema_param in zip(critic.parameters(), ema_critic.parameters()):
-                        ema_param.data.copy_(cfg.ema_critic_tau * param.data + (1.0 - cfg.ema_critic_tau) * ema_param.data)
+                    for param, ema_param in zip(
+                        critic.parameters(), ema_critic.parameters()
+                    ):
+                        ema_param.data.copy_(
+                            cfg.ema_critic_tau * param.data
+                            + (1.0 - cfg.ema_critic_tau) * ema_param.data
+                        )
 
                     total_actor_loss += actor_loss.item()
                     total_critic_loss += critic_loss.item()
@@ -424,11 +459,6 @@ def train_dreamer():
                 #         total_replay_terminal_items,
                 #         replay_terminal_rate,
                 #     )
-            avg_episode_length = (
-                sum(list_iterations_episode_length) / len(list_iterations_episode_length)
-                if list_iterations_episode_length
-                else 0.0
-            )
 
             # Log finished episodes and carry the step outcome to the next
             # replay row, where it is aligned with the resulting observation.
@@ -440,6 +470,12 @@ def train_dreamer():
                 if "_episode" in infos and infos["_episode"][i]:
                     episodes_finished += 1
                     list_iterations_episode_length.append(infos["episode"]["l"][i])
+                    avg_episode_length = (
+                        sum(list_iterations_episode_length)
+                        / len(list_iterations_episode_length)
+                        if list_iterations_episode_length
+                        else 0.0
+                    )
                     episode_metrics = {
                         "episode/return": infos["episode"]["r"][i],
                         "episode/length": infos["episode"]["l"][i],
@@ -449,6 +485,7 @@ def train_dreamer():
                         "episode/termination_reason": infos["termination_reason"][i],
                         "episode/final_hunger": infos["hunger"][i],
                         "episode/final_thirst": infos["thirst"][i],
+                        "average_episode_length": avg_episode_length,
                         "global_step": global_step,
                     }
                     # Episodes can finish while replay is still warming up.
@@ -460,19 +497,29 @@ def train_dreamer():
                             {
                                 "train/policy_loss": actor_loss_value,
                                 "train/value_loss": critic_loss_value,
-                                "train/entropy": ac_metrics.get("actor_critic/entropy", 0.0),
-                                "train/learning_rate": actor_optimizer.param_groups[0]["lr"],
+                                "train/entropy": ac_metrics.get(
+                                    "actor_critic/entropy", 0.0
+                                ),
+                                "train/learning_rate": optimizer.param_groups[0]["lr"],
                                 # "train/kl_divergence": 0.0,
-                                "train/dyn_loss": wm_metrics.get("world_model/dyn_loss", 0.0),
-                                "train/rep_loss": wm_metrics.get("world_model/rep_loss", 0.0),
-                                "train/explained_variance": ac_metrics.get("actor_critic/explained_variance", 0.0),
+                                "train/dyn_loss": wm_metrics.get(
+                                    "world_model/dyn_loss", 0.0
+                                ),
+                                "train/rep_loss": wm_metrics.get(
+                                    "world_model/rep_loss", 0.0
+                                ),
+                                "train/explained_variance": ac_metrics.get(
+                                    "actor_critic/explained_variance", 0.0
+                                ),
                             }
                         )
                     mlflow.log_metrics(episode_metrics, step=episodes_finished)
 
-                    logger.info(f"Episode finished at global step {global_step}: return={infos['episode']['r'][i]}, length={infos['episode']['l'][i]}, food_consumed={infos['food_consumed'][i]}, water_consumed={infos['water_consumed'][i]}, posture={infos['posture'][i]}, termination_reason={infos['termination_reason'][i]}, final_hunger={infos['hunger'][i]}, final_thirst={infos['thirst'][i]}")
+                    logger.info(
+                        f"Episode finished at global step {global_step}: return={infos['episode']['r'][i]}, length={infos['episode']['l'][i]}, food_consumed={infos['food_consumed'][i]}, water_consumed={infos['water_consumed'][i]}, posture={infos['posture'][i]}, termination_reason={infos['termination_reason'][i]}, final_hunger={infos['hunger'][i]}, final_thirst={infos['thirst'][i]}"
+                    )
             iteration += 1
-            
+
             if global_step % 100_000 == 0 and global_step > 0:
                 logger.info(f"Global step {global_step}: Saving models...")
                 torch.save(world_model.state_dict(), model_path_world_model)
@@ -484,8 +531,12 @@ def train_dreamer():
     torch.save(actor.state_dict(), model_path_actor)
     torch.save(critic.state_dict(), model_path_critic)
 
-    logger.info(f"Models saved to {model_path_world_model}, {model_path_actor}, {model_path_critic}")
-    print(f"Models saved to {model_path_world_model}, {model_path_actor}, {model_path_critic}")
+    logger.info(
+        f"Models saved to {model_path_world_model}, {model_path_actor}, {model_path_critic}"
+    )
+    print(
+        f"Models saved to {model_path_world_model}, {model_path_actor}, {model_path_critic}"
+    )
 
 
 if __name__ == "__main__":
