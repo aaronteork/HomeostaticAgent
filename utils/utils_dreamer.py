@@ -1,4 +1,4 @@
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import torch
@@ -468,35 +468,40 @@ def compute_discount_weights_from_continues(
 
 
 def compute_replay_lambda_returns(
-    rewards, values, terminals, is_last, bootstrap, config
+    rewards, terminals, is_last, imagination_bootstraps, config
 ):
-    """Return replay targets without crossing reset boundaries.
+    """Return imagination-annotated replay targets without crossing boundaries.
 
     True terminals suppress bootstrapping. Truncated ``is_last`` rows stop the
-    lambda trace but retain the one-step value bootstrap from their final
-    observation.
+    lambda trace but retain the one-step imagination bootstrap from their final
+    observation. Each replay state has its own imagination return annotation,
+    matching DreamerV3/R2Dreamer replay value learning.
     """
     if rewards.shape[1] < 2:
         raise ValueError("Replay value loss needs at least two timesteps")
+    if terminals.shape != rewards.shape or is_last.shape != rewards.shape:
+        raise ValueError(
+            "rewards, terminals, and is_last must have matching (batch, time) shapes"
+        )
+    if imagination_bootstraps.shape != rewards.shape:
+        raise ValueError(
+            "imagination_bootstraps must provide one annotation per replay state"
+        )
 
     rewards_next = rewards[:, 1:]
     terminals_next = terminals[:, 1:]
     is_last_next = is_last[:, 1:]
     current_is_last = is_last[:, :-1]
-    values_for_loss = values[:, :-1]
     live_next = (1.0 - terminals_next.float()) * config.discount
     trace_next = (1.0 - is_last_next.float()) * config.gae_lambda
 
     replay_returns = torch.zeros_like(rewards_next)
-    next_return = bootstrap.detach()
+    detached_bootstraps = imagination_bootstraps.detach()
+    next_return = detached_bootstraps[:, -1]
     for t in reversed(range(rewards_next.shape[1])):
-        next_value = (
-            bootstrap.detach()
-            if t == rewards_next.shape[1] - 1
-            else values_for_loss[:, t + 1]
-        )
+        next_bootstrap = detached_bootstraps[:, t + 1]
         target = rewards_next[:, t] + live_next[:, t] * (
-            (1.0 - trace_next[:, t]) * next_value
+            (1.0 - trace_next[:, t]) * next_bootstrap
             + trace_next[:, t] * next_return
         )
         replay_returns[:, t] = target
@@ -505,12 +510,16 @@ def compute_replay_lambda_returns(
     # Replay sequences can cross reset boundaries, so cumulative imagination
     # weights are inappropriate here. Match official replay value learning by
     # masking only boundary rows; reset rows start a fresh episode at weight 1.
-    discount_weights = 1.0 - current_is_last.detach()
+    discount_weights = 1.0 - current_is_last.detach().float()
     return replay_returns, discount_weights
 
 
 def compute_replay_value_loss(
-    critic, ema_critic, replay_trajectories, bootstrap, config: DreamerConfig
+    critic,
+    ema_critic,
+    replay_trajectories,
+    imagination_bootstraps,
+    config: DreamerConfig,
 ):
     # Let replay-value prediction shape the posterior encoder/RSSM features.
     # Replay targets and environment labels remain detached below.
@@ -520,13 +529,11 @@ def compute_replay_value_loss(
     is_last = replay_trajectories["is_last"].detach()
 
     with torch.no_grad():
-        values = ema_critic(latents).mode.squeeze(-1)
         replay_returns, discount_weights = compute_replay_lambda_returns(
             rewards,
-            values,
             terminals,
             is_last,
-            bootstrap=bootstrap.detach(),
+            imagination_bootstraps=imagination_bootstraps,
             config=config,
         )
 
@@ -657,12 +664,18 @@ def compute_actor_critic_loss(
             raise ValueError(
                 "imagined_trajectories must include start_batch_size and start_count for replay value loss"
             )
-        replay_bootstrap = (
-            critic_returns[:, 0].detach().view(start_batch_size, start_count)[:, -1]
+        replay_bootstraps = (
+            critic_returns[:, 0]
+            .detach()
+            .view(start_batch_size, start_count)
         )
         replay_loss, replay_return_loss, replay_slow_loss, replay_returns = (
             compute_replay_value_loss(
-                critic, ema_critic, replay_trajectories, replay_bootstrap, config
+                critic,
+                ema_critic,
+                replay_trajectories,
+                replay_bootstraps,
+                config,
             )
         )
         critic_loss = critic_loss + config.critic_replay_loss * replay_loss
