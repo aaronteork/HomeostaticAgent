@@ -80,9 +80,7 @@ def train_dreamer():
 
     # Create model save timestamp
     timestamp = dt.datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d_%H-%M-%S")
-    model_path_world_model = f"./models/dreamer_world_model_{timestamp}.pt"
-    model_path_actor = f"./models/dreamer_actor_{timestamp}.pt"
-    model_path_critic = f"./models/dreamer_critic_{timestamp}.pt"
+    model_path = f"./models/dreamer_{timestamp}.pt"
 
     # Create replay buffer
     replay_buffer = SequenceReplayBuffer(cfg, device=cfg.device)
@@ -523,20 +521,29 @@ def train_dreamer():
 
             if global_step % 100_000 == 0 and global_step > 0:
                 logger.info(f"Global step {global_step}: Saving models...")
-                torch.save(world_model.state_dict(), model_path_world_model)
-                torch.save(actor.state_dict(), model_path_actor)
-                torch.save(critic.state_dict(), model_path_critic)
+                torch.save(
+                    {
+                        "world_model": world_model.state_dict(),
+                        "actor": actor.state_dict(),
+                        "critic": critic.state_dict(),
+                    },
+                    model_path
+                )
 
     # Save models
-    torch.save(world_model.state_dict(), model_path_world_model)
-    torch.save(actor.state_dict(), model_path_actor)
-    torch.save(critic.state_dict(), model_path_critic)
-
+    torch.save(
+        {
+            "world_model": world_model.state_dict(),
+            "actor": actor.state_dict(),
+            "critic": critic.state_dict(),
+        },
+        model_path
+    )
     logger.info(
-        f"Models saved to {model_path_world_model}, {model_path_actor}, {model_path_critic}"
+        f"Models saved to {model_path}"
     )
     print(
-        f"Models saved to {model_path_world_model}, {model_path_actor}, {model_path_critic}"
+        f"Models saved to {model_path}"
     )
 
 
