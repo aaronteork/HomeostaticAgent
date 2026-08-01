@@ -1,4 +1,5 @@
 import datetime as dt
+from zoneinfo import ZoneInfo
 from dataclasses import asdict
 
 import mlflow
@@ -78,7 +79,7 @@ def train_dreamer():
     logger.info("Created actor, critic, and EMA critic networks")
 
     # Create model save timestamp
-    timestamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp = dt.datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d_%H-%M-%S")
     model_path_world_model = f"./models/dreamer_world_model_{timestamp}.pt"
     model_path_actor = f"./models/dreamer_actor_{timestamp}.pt"
     model_path_critic = f"./models/dreamer_critic_{timestamp}.pt"
@@ -137,7 +138,7 @@ def train_dreamer():
 
     with mlflow.start_run(
         run_name="Dreamer V3 Training - "
-        + dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        + dt.datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d_%H-%M-%S")
     ):
         mlflow.log_params(asdict(cfg))
 

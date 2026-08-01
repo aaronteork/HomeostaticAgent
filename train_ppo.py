@@ -1,4 +1,5 @@
 import datetime as dt
+from zoneinfo import ZoneInfo
 from dataclasses import asdict
 
 import numpy as np
@@ -63,7 +64,7 @@ def train_ppo():
     # truncation bootstrapping, but exclude it from PPO optimization.
     reset_only = np.zeros(cfg.num_workers, dtype=bool)
     # PPO iterations
-    with mlflow.start_run(run_name="PPO Training - " + dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")):
+    with mlflow.start_run(run_name="PPO Training - " + dt.datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d_%H-%M-%S")):
         mlflow.log_params(asdict(cfg))
         for iterations in range(cfg.total_updates):
             # Rollout phase
@@ -310,7 +311,7 @@ def train_ppo():
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    model_path = f"./models/ppo_agent_{dt.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.pt"
+    model_path = f"./models/ppo_agent_{dt.datetime.now(ZoneInfo("Asia/Singapore")).strftime('%Y-%m-%d_%H-%M-%S')}.pt"
     torch.save(agent.state_dict(), model_path)
     print(f"model saved to {model_path}")
 
