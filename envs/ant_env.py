@@ -146,9 +146,20 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
             self.thirst = self.np_random.uniform(-(1 / 6), (1 / 6))
             self.temperature = self.np_random.uniform(-(1 / 6), (1 / 6))
         else:
-            self.hunger = 0.0
-            self.thirst = 0.0
-            self.temperature = 0.0
+            # For shifting internal state task
+            if self.cfg.shift:
+                if self.np_random.random() < 0.5:
+                    self.hunger = self.np_random.uniform(-0.15, -0.11)
+                    self.thirst = self.np_random.uniform(-0.1, -0.05)
+                    self.temperature = 0.0  # placeholder value
+                else:
+                    self.hunger = self.np_random.uniform(-0.1, -0.05)
+                    self.thirst = self.np_random.uniform(-0.15, -0.11)
+                    self.temperature = 0.0  # placeholder value
+            else:
+                self.hunger = 0.0
+                self.thirst = 0.0
+                self.temperature = 0.0
 
         # Add if no heat
         if self.cfg.num_heat == 0:
@@ -163,78 +174,88 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
         # --------------- Agent's initial position and orientation ---------------
         # Ranomize agent's initial position and orientation, but keep it within the arena and not too close to the walls
         # self.init_qpos includes the x and y coordinates in the first 2 entries, different from observation space which does not
-        qpos = self.init_qpos + self.np_random.uniform(
-            size=self.model.nq, low=-0.01, high=0.01
-        )
-        # Start at random positions in the arena, but not too close to the walls
-        qpos[0] = self.np_random.uniform(-self.cfg.arena_size + 2, self.cfg.arena_size - 2)
-        qpos[1] = self.np_random.uniform(-self.cfg.arena_size + 2, self.cfg.arena_size - 2)
+        if self.cfg.shift:
+            qpos = self.init_qpos
+            qvel = self.init_qvel
+        else:
+            qpos = self.init_qpos + self.np_random.uniform(
+                size=self.model.nq, low=-0.01, high=0.01
+            )
+            # Start at random positions in the arena, but not too close to the walls
+            qpos[0] = self.np_random.uniform(-self.cfg.arena_size + 2, self.cfg.arena_size - 2)
+            qpos[1] = self.np_random.uniform(-self.cfg.arena_size + 2, self.cfg.arena_size - 2)
 
-        curr_w, curr_x, curr_y, curr_z = qpos[3:7]
-        current_rot = st.Rotation.from_quat([curr_x, curr_y, curr_z, curr_w])
-        random_yaw_angle = self.np_random.uniform(low=0, high=2 * np.pi)
-        yaw_rot = st.Rotation.from_euler("z", random_yaw_angle)
-        final_rot = yaw_rot * current_rot
-        raw_quat = final_rot.as_quat()
-        qpos[3:7] = [raw_quat[3], raw_quat[0], raw_quat[1], raw_quat[2]]
+            curr_w, curr_x, curr_y, curr_z = qpos[3:7]
+            current_rot = st.Rotation.from_quat([curr_x, curr_y, curr_z, curr_w])
+            random_yaw_angle = self.np_random.uniform(low=0, high=2 * np.pi)
+            yaw_rot = st.Rotation.from_euler("z", random_yaw_angle)
+            final_rot = yaw_rot * current_rot
+            raw_quat = final_rot.as_quat()
+            qpos[3:7] = [raw_quat[3], raw_quat[0], raw_quat[1], raw_quat[2]]
 
-        qvel = self.init_qvel + self.np_random.uniform(
-            low=-0.01, high=0.01, size=self.model.nv
-        )
+            qvel = self.init_qvel + self.np_random.uniform(
+                low=-0.01, high=0.01, size=self.model.nv
+            )
         self.set_state(qpos, qvel)
         self.posture = self._get_posture()
 
         # ------------------- Reset resources ------------------- #
         self.object = []
-        existing_items = set()
-        # Food with random positions
-        for i in range(self.cfg.num_food):
-            regen = True
-            while regen:
-                regen = False
-                x = self.np_random.uniform(-self.cfg.arena_size + 0.75, self.cfg.arena_size - 0.75)
-                y = self.np_random.uniform(-self.cfg.arena_size + 0.75, self.cfg.arena_size - 0.75)
-                if np.linalg.norm(np.array([x, y]) - np.array(qpos[:2])) < self.cfg.object_spacing:
-                    regen = True
-                    continue
-                for pos in existing_items:
-                    if np.linalg.norm(np.array([x, y]) - np.array(pos)) < self.cfg.object_spacing:
+        existing_items = set()            
+        if self.cfg.shift:
+            # Add one food
+            self.object.append(("food", -3, 4))
+            # Add one water
+            self.object.append(("water", 3, 4))
+        else:
+            # Food with random positions
+            for i in range(self.cfg.num_food):
+                regen = True
+                while regen:
+                    regen = False
+                    x = self.np_random.uniform(-self.cfg.arena_size + 0.75, self.cfg.arena_size - 0.75)
+                    y = self.np_random.uniform(-self.cfg.arena_size + 0.75, self.cfg.arena_size - 0.75)
+                    if np.linalg.norm(np.array([x, y]) - np.array(qpos[:2])) < self.cfg.object_spacing:
                         regen = True
-                        break
-            existing_items.add((x, y))
-            self.object.append(("food", x, y))
-        # Water with random positions
-        for i in range(self.cfg.num_water):
-            regen = True
-            while regen:
-                regen = False
-                x = self.np_random.uniform(-self.cfg.arena_size + 0.75, self.cfg.arena_size - 0.75)
-                y = self.np_random.uniform(-self.cfg.arena_size + 0.75, self.cfg.arena_size - 0.75)
-                if np.linalg.norm(np.array([x, y]) - np.array(qpos[:2])) < self.cfg.object_spacing:
-                    regen = True
-                    continue
-                for pos in existing_items:
-                    if np.linalg.norm(np.array([x, y]) - np.array(pos)) < self.cfg.object_spacing:
+                        continue
+                    for pos in existing_items:
+                        if np.linalg.norm(np.array([x, y]) - np.array(pos)) < self.cfg.object_spacing:
+                            regen = True
+                            break
+                existing_items.add((x, y))
+                self.object.append(("food", x, y))
+            # Water with random positions
+            for i in range(self.cfg.num_water):
+                regen = True
+                while regen:
+                    regen = False
+                    x = self.np_random.uniform(-self.cfg.arena_size + 0.75, self.cfg.arena_size - 0.75)
+                    y = self.np_random.uniform(-self.cfg.arena_size + 0.75, self.cfg.arena_size - 0.75)
+                    if np.linalg.norm(np.array([x, y]) - np.array(qpos[:2])) < self.cfg.object_spacing:
                         regen = True
-                        break
-            existing_items.add((x, y))
-            self.object.append(("water", x, y))
-        # Heat with random positions
-        for i in range(self.cfg.num_heat):
-            regen = True
-            while regen:
-                regen = False
-                x = self.np_random.uniform(-self.cfg.arena_size + 0.75, self.cfg.arena_size - 0.75)
-                y = self.np_random.uniform(-self.cfg.arena_size + 0.75, self.cfg.arena_size - 0.75)
-                if np.linalg.norm(np.array([x, y]) - np.array(qpos[:2])) < self.cfg.object_spacing:
-                    regen = True
-                    continue
-                for pos in existing_items:
-                    if np.linalg.norm(np.array([x, y]) - np.array(pos)) < self.cfg.object_spacing:
+                        continue
+                    for pos in existing_items:
+                        if np.linalg.norm(np.array([x, y]) - np.array(pos)) < self.cfg.object_spacing:
+                            regen = True
+                            break
+                existing_items.add((x, y))
+                self.object.append(("water", x, y))
+            # Heat with random positions
+            for i in range(self.cfg.num_heat):
+                regen = True
+                while regen:
+                    regen = False
+                    x = self.np_random.uniform(-self.cfg.arena_size + 0.75, self.cfg.arena_size - 0.75)
+                    y = self.np_random.uniform(-self.cfg.arena_size + 0.75, self.cfg.arena_size - 0.75)
+                    if np.linalg.norm(np.array([x, y]) - np.array(qpos[:2])) < self.cfg.object_spacing:
                         regen = True
-                        break
-            existing_items.add((x, y))
-            self.object.append(("heat", x, y))
+                        continue
+                    for pos in existing_items:
+                        if np.linalg.norm(np.array([x, y]) - np.array(pos)) < self.cfg.object_spacing:
+                            regen = True
+                            break
+                existing_items.add((x, y))
+                self.object.append(("heat", x, y))
 
         # Initialize previous drive for the paper's reward formula
         self.prev_drive = self._calculate_drive()
@@ -429,6 +450,20 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
         self.current_step += 1
         self.posture = self._get_posture()
 
+        # Add shift after 50 steps
+        # Change the secondary resource positions after 50 steps if shift is enabled
+        if self.cfg.shift and self.current_step == 100:
+            if self.hunger < self.thirst:
+                self.thirst -= 0.2
+            elif self.hunger > self.thirst:
+                self.hunger -= 0.2
+            else:
+                # Randomly choose one to decrease if they are equal
+                if self.np_random.random() < 0.5:
+                    self.hunger -= 0.2
+                else:
+                    self.thirst -= 0.2
+
         # Homeostatic Dynamics
         is_night = (self.current_step % self.cfg.day_night_cycle_len) >= (
             self.cfg.day_night_cycle_len / 2
@@ -445,13 +480,15 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
                 if type_gen == "food" and self._is_in_front(np.array([x, y])):
                     self.hunger += self.cfg.replenish_rate
                     self.food_consumed += 1
-                    self.object.append(self._generate_new_object(type_gen))
-                    self.object.remove(obj)
+                    if not self.cfg.shift:
+                        self.object.append(self._generate_new_object(type_gen))
+                        self.object.remove(obj)
                 elif type_gen == "water" and self._is_in_front(np.array([x, y])):
                     self.thirst += self.cfg.replenish_rate
                     self.water_consumed += 1
-                    self.object.append(self._generate_new_object(type_gen))
-                    self.object.remove(obj)
+                    if not self.cfg.shift:
+                        self.object.append(self._generate_new_object(type_gen))
+                        self.object.remove(obj)
                 elif type_gen == "heat":
                     # heat doesnt get consumed
                     contact_heat += 1

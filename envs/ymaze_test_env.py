@@ -132,8 +132,8 @@ class YMazeTestEnv(AntEnv, EzPickle):
         self.resources_consumed = []
 
         # Store initial state for correctness evaluation
-        self._initial_hunger = 0.0
-        self._initial_thirst = 0.0
+        self._initial_hunger = self.hunger
+        self._initial_thirst = self.thirst
 
         # ------------ Observation and Action space -------------- #
         # Action space: 8 continuous dims (no temperature/sweat action)
@@ -519,11 +519,11 @@ class YMazeTestEnv(AntEnv, EzPickle):
             abs(self.hunger) > 0.99999
             or abs(self.thirst) > 0.99999
         )
-        up_vector_z = self.data.xmat[self.ant_body_id][8]
-        is_flipped = up_vector_z < 0.0
-        both_consumed = self.food_consumed >= 1 and self.water_consumed >= 1
+        # up_vector_z = self.data.xmat[self.ant_body_id][8]
+        # is_flipped = up_vector_z < 0.0
+        # both_consumed = self.food_consumed >= 1 and self.water_consumed >= 1
 
-        return bool(limit_reached) or is_flipped or both_consumed
+        return bool(limit_reached)
 
     @property
     def truncated(self):

@@ -11,6 +11,7 @@ class EnvConfig(BaseConfig):
     image_size: tuple[int, int] = (64, 64)
     num_workers: int = 16
     arena_size: float = 6.0
+    shift: bool = False
     day_night_cycle_len: int = 1
     object_spacing: float = 2.0
     object_interaction_dist: float = 1.0

@@ -30,12 +30,12 @@ class YMazeConfig(EnvConfig):
 
     # Internal state initialization
     # Primary need is more depleted (more negative), secondary is less depleted
-    primary_need_low: float = -0.1  # -0.45
-    primary_need_high: float = -0.05  # -0.25
-    secondary_need_low: float = 0.05 # -0.20
-    secondary_need_high: float = 0.1 # -0.05
+    primary_need_low: float = -0.15  # -0.45
+    primary_need_high: float = -0.11  # -0.25
+    secondary_need_low: float = -0.1 # -0.20
+    secondary_need_high: float = -0.05 # -0.05
 
     # Test settings
     randomize_arms: bool = True  # Whether to randomize which arm has food vs water each episode
     is_training: bool = False    # Override default; test environment renders debug images
-    episodes_to_run: int = 100             # Number of episodes to run for evaluation
+    episodes_to_run: int = 5             # Number of episodes to run for evaluation
