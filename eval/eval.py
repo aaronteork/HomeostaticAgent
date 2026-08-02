@@ -1,6 +1,7 @@
 import argparse
 import datetime as dt
 from zoneinfo import ZoneInfo
+from dataclasses import replace
 
 import cv2
 import numpy as np
@@ -11,6 +12,7 @@ from tqdm.auto import tqdm
 
 # Dreamer
 from configs.config_dreamer import DreamerConfig
+from utils.world_model import ActorNetwork, WorldModel
 
 # PPO
 from configs.config_ppo import PPOConfig
@@ -75,7 +77,7 @@ def prep_obs(obs):
     return obs_dict
 
 
-def ppo_get_action(model, obs, deterministic=True, device="cuda"):
+def get_ppo_action(model, obs, deterministic=True, device="cuda"):
     with torch.inference_mode():
         action, _, _, _ = model(
             obs["vision"].to(device),
@@ -84,6 +86,70 @@ def ppo_get_action(model, obs, deterministic=True, device="cuda"):
             deterministic=deterministic,
         )
     return action
+
+
+def get_dreamer_agent(world_model, dreamer_actor, *, device, deterministic=True):
+    """Build a stateful Dreamer policy for a single evaluation environment.
+
+    The RSSM posterior must be carried between environment steps.  Call
+    ``agent.reset()`` immediately after every ``env.reset()`` so the next
+    observation is processed from Dreamer's fixed zero RSSM state.
+    """
+    recurrent_state = None
+    previous_stochastic = None
+    previous_action = None
+    is_first = True
+
+    def reset():
+        nonlocal recurrent_state, previous_stochastic, previous_action, is_first
+        recurrent_state = None
+        previous_stochastic = None
+        previous_action = None
+        is_first = True
+
+    @torch.inference_mode()
+    def agent(obs):
+        nonlocal recurrent_state, previous_stochastic, previous_action, is_first
+
+        vision = obs["vision"].to(device)
+        proprioception = obs["proprioception"].to(device, dtype=torch.float32)
+        internal_state = obs["internal_state"].to(device)
+        batch_size = vision.shape[0]
+
+        if previous_action is None:
+            previous_action = torch.zeros(
+                batch_size,
+                world_model.config.action_space_dim,
+                device=device,
+                dtype=torch.float32,
+            )
+
+        embed = world_model.encode(
+            {
+                "vision": vision,
+                "proprioception": proprioception,
+                "internal_state": internal_state,
+            }
+        )
+        first = torch.full(
+            (batch_size,), is_first, device=device, dtype=torch.bool
+        )
+        latent, recurrent_state, _, _ = world_model.observe(
+            previous_action,
+            embed,
+            first,
+            recurrent_state=recurrent_state,
+            previous_stochastic=previous_stochastic,
+            deterministic=deterministic,
+        )
+        previous_stochastic, recurrent_state = world_model.rssm.split_feature(latent)
+        action, _, _ = dreamer_actor(latent, deterministic=deterministic)
+        previous_action = action
+        is_first = False
+        return action
+
+    agent.reset = reset
+    return agent
 
 
 def create_ymaze(config):
@@ -99,6 +165,8 @@ def task_forage(model, config, out_pov, out_env, model_name):
     # Create environment
     env = create_env(config, multiple_env=False)
     obs, info = env.reset()
+    if model_name == "dreamer":
+        model.reset()
 
     # Setup statistics collection
     episode_reward = []
@@ -113,7 +181,9 @@ def task_forage(model, config, out_pov, out_env, model_name):
         obs = prep_obs(obs)
         # Get action from agent
         if model_name == "ppo":
-            action = ppo_get_action(model, obs, deterministic=True, device=config.device)
+            action = get_ppo_action(model, obs, deterministic=True, device=config.device)
+        elif model_name == "dreamer":
+            action = model(obs)
         action = action.cpu().numpy().squeeze(0)
 
         # Step environment
@@ -152,7 +222,6 @@ def task_forage(model, config, out_pov, out_env, model_name):
     )
 
 
-
 def task_shift(model, config, out_pov, out_env, model_name):
 
     # Create environment
@@ -160,6 +229,8 @@ def task_shift(model, config, out_pov, out_env, model_name):
     
     for episode in tqdm(range(10), desc="Evaluating agent"):
         obs, info = env.reset()
+        if model_name == "dreamer":
+            model.reset()
         # Setup statistics collection
         episode_steps = 0
         done = False
@@ -167,7 +238,9 @@ def task_shift(model, config, out_pov, out_env, model_name):
             obs = prep_obs(obs)
             # Get action from agent
             if model_name == "ppo":
-                action = ppo_get_action(model, obs, deterministic=True, device=config.device)
+                action = get_ppo_action(model, obs, deterministic=True, device=config.device)
+            elif model_name == "dreamer":
+                action = model(obs)
             action = action.cpu().numpy().squeeze(0)
 
             # Step environment
@@ -211,6 +284,8 @@ def task_ymaze(model, config, out_pov, out_env, model_name):
 
     for episode in tqdm(range(ymaze_cfg.episodes_to_run), desc="Evaluating agent"):
         obs, info = env.reset()
+        if model_name == "dreamer":
+            model.reset()
         done = False
         while not done:
             # Get model inputs
@@ -218,7 +293,9 @@ def task_ymaze(model, config, out_pov, out_env, model_name):
 
             # Get action from agent
             if model_name == "ppo":
-                action = ppo_get_action(model, obs, deterministic=True, device=config.device)
+                action = get_ppo_action(model, obs, deterministic=True, device=config.device)
+            elif model_name == "dreamer":
+                action = model(obs)
             action = action.cpu().numpy().squeeze(0)
 
             # Step environment
@@ -253,12 +330,26 @@ def evaluate_agent(args):
     if args.model == "ppo":
         config = PPOConfig(is_training=False, image_size=(512, 512))
         model = HomeostaticPPO(config).to(config.device)
-    # checkpoint = torch.load(args.model_path, map_location=config.device)
-    # cleaned_state_dict = {
-    #     key.replace("_orig_mod.", ""): value for key, value in checkpoint.items()
-    # }
-    # model.load_state_dict(cleaned_state_dict)
-    model.eval()
+        # checkpoint = torch.load(args.model_path, map_location=config.device)
+        # cleaned_state_dict = {
+        #     key.replace("_orig_mod.", ""): value for key, value in checkpoint.items()
+        # }
+        # model.load_state_dict(cleaned_state_dict)
+        model.eval()
+    elif args.model == "dreamer":
+        config = DreamerConfig(is_training=False, image_size=(512, 512))
+        world_model = WorldModel(config).to(config.device)
+        dreamer_actor = ActorNetwork(config).to(config.device)
+        # checkpoint = torch.load(args.model_path, map_location=config.device)
+        # checkpoint["world_model"] = {key.replace("_orig_mod.", ""): value for key, value in checkpoint["world_model"].items()}
+        # checkpoint["actor"] = {key.replace("_orig_mod.", ""): value for key, value in checkpoint["actor"].items()}
+        # world_model.load_state_dict(checkpoint["world_model"])
+        # dreamer_actor.load_state_dict(checkpoint["actor"])
+        world_model.eval()
+        dreamer_actor.eval()
+        model = get_dreamer_agent(
+            world_model, dreamer_actor, device=config.device, deterministic=True
+        )
 
     # Set up video recording
     out_pov, out_env = setup_video_recording(args.model, args.task)
@@ -269,7 +360,7 @@ def evaluate_agent(args):
     elif args.task == "ymaze":
         task_ymaze(model, config, out_pov, out_env, args.model)
     elif args.task == "shift":
-        config = PPOConfig(is_training=False, image_size=(512, 512), shift=True)
+        config = replace(config, shift=True)
         task_shift(model, config, out_pov, out_env, args.model)
 
     # Close video writers
