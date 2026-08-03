@@ -606,7 +606,9 @@ class ActorNetwork(nn.Module):
         raw_std = self.std_head(x)
 
         loc = torch.tanh(raw_mean)  # bounded center in [-1, 1]
-        std = 0.1 + (1.0 - 0.1) * torch.sigmoid(raw_std)
+        std = self.config.actor_min_std + (
+            self.config.actor_max_std - self.config.actor_min_std
+        ) * torch.sigmoid(raw_std)
 
         dist = TruncatedNormal(
             loc=loc,
