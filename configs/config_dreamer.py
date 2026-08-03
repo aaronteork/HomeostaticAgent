@@ -15,7 +15,7 @@ class DreamerConfig(EnvConfig):
     mlp_n_layers: int = 3
     batch_size: int = 16
     batch_length: int = 64
-    total_env_steps: int = 5_000_000
+    total_env_steps: int = 3_000_000
     replay_ratio: int = 64   # Was originally 512 to follow the paper for visual control but reduced 32 to match Minecraft since one episode is quite long too (to decay)
     # total_updates: int = 1_000
     adam_eps: float = 1e-5
@@ -60,6 +60,9 @@ class DreamerConfig(EnvConfig):
     return_norm_percentile_high: float = 95.0
 
     # Actor and critic
+    actor_min_std: float = 0.1
+    actor_max_std: float = 1.0
+    actor_outscale: float = 0.01
     # actor_lr: float = 3e-5
     # actor_critic_grad_steps_per_update: int = 1
     # actor_grad_norm_clip: float = 100.0
@@ -81,6 +84,13 @@ class DreamerConfig(EnvConfig):
     def __post_init__(self):
         if self.replay_context < 0:
             raise ValueError("replay_context must be non-negative")
+        if not 0.0 < self.actor_min_std <= self.actor_max_std:
+            raise ValueError(
+                "actor standard deviations must satisfy "
+                "0 < actor_min_std <= actor_max_std"
+            )
+        if self.actor_outscale <= 0.0:
+            raise ValueError("actor_outscale must be positive")
         if self.min_buffer_size_before_training is None:
             object.__setattr__(
                 self,

@@ -78,14 +78,15 @@ class CustomFrameStackObservation(gym.Wrapper, gym.utils.RecordConstructorArgs):
         return self._process_obs(obs), reward, terminated, truncated, info
 
 
-def create_env(config, multiple_env=False):
+def create_env(config, multiple_env=False, rescale_action=True):
     """
     Creates either a single environment or an AsyncVectorEnv.
     """
     def _base_env_setup():
         env = HomeostaticAntEnv(config)
         env = RecordEpisodeStatistics(env)
-        env = RescaleAction(env, 0, 1)
+        if rescale_action:
+            env = RescaleAction(env, 0, 1)
         if hasattr(config, "frame_stack_key") and config.frame_stack_key:
             env = CustomFrameStackObservation(
                 env, 

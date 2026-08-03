@@ -5,10 +5,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch.distributions import (
-    Beta,
     Independent,
     OneHotCategoricalStraightThrough,
 )
+from torchrl.modules import TruncatedNormal
 
 from configs.config_dreamer import DreamerConfig
 from utils.utils_dreamer import (
@@ -562,13 +562,11 @@ class ActorNetwork(nn.Module):
             config, input_dim=input_dim, output_dim=config.hidden_dim, num_layers=3
         )
 
-        # Beta distribution parameters for continuous actions
-        self.alpha = nn.Sequential(
-            nn.Linear(config.hidden_dim, action_dim), nn.Softplus()
-        )
-        self.beta = nn.Sequential(
-            nn.Linear(config.hidden_dim, action_dim), nn.Softplus()
-        )
+        # DreamerV3 bounded-normal policy parameters. The distribution is
+        # represented in this project's wrapped [0, 1] action coordinates;
+        # RescaleAction maps those actions back to the Ant's native [-1, 1].
+        self.mean_head = nn.Linear(config.hidden_dim, action_dim)
+        self.std_head = nn.Linear(config.hidden_dim, action_dim)
 
         self._init_weights()
 
@@ -577,6 +575,10 @@ class ActorNetwork(nn.Module):
             if isinstance(module, nn.Linear):
                 nn.init.orthogonal_(module.weight)
                 nn.init.zeros_(module.bias)
+        # Match DreamerV3's small policy output scale without shrinking the
+        # actor's hidden layers.
+        nn.init.orthogonal_(self.mean_head.weight, gain=self.config.actor_outscale)
+        nn.init.orthogonal_(self.std_head.weight, gain=self.config.actor_outscale)
 
     def forward(self, latent, deterministic=False):
         """
@@ -584,7 +586,7 @@ class ActorNetwork(nn.Module):
 
         Args:
             latent: (batch, latent_dim) or (batch, seq_len, latent_dim)
-            deterministic: if True, return mean action
+            deterministic: if True, return the distribution mode
 
         Returns:
             action: (batch, action_dim) or (batch, seq_len, action_dim)
@@ -600,15 +602,27 @@ class ActorNetwork(nn.Module):
             squeeze_output = False
 
         x = self.net(latent_flat)
-        alpha = self.alpha(x) + 1.0
-        beta = self.beta(x) + 1.0
-        dist = Beta(alpha, beta)
+        raw_mean = self.mean_head(x)
+        raw_std = self.std_head(x)
+
+        loc = torch.tanh(raw_mean)  # bounded center in [-1, 1]
+        std = 0.1 + (1.0 - 0.1) * torch.sigmoid(raw_std)
+
+        dist = TruncatedNormal(
+            loc=loc,
+            scale=std,
+            low=-1.0,
+            high=1.0,
+        )
+
         if deterministic:
-            action = dist.mode  # Beta mode in [0, 1] because alpha,beta > 1
+            action = dist.mode
         else:
             action = dist.rsample()
 
-        log_prob = dist.log_prob(action).sum(dim=-1)
+        # TorchRL's TruncatedNormal treats the final action dimension as one
+        # event, so log_prob and entropy are already joint over all joints.
+        log_prob = dist.log_prob(action)
 
         if squeeze_output:
             action = action.view(batch_size, seq_len, -1)

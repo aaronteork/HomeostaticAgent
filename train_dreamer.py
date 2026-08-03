@@ -47,7 +47,7 @@ def train_dreamer():
     )
 
     # Create environment
-    env = create_env(cfg, multiple_env=True)
+    env = create_env(cfg, multiple_env=True, rescale_action=False)
     # frame_skip = env.envs[0].unwrapped.frame_skip
     logger.info(f"Created parallel environment with {cfg.num_workers} workers")
 

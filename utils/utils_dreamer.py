@@ -391,8 +391,10 @@ def imagination_rollout(
     for step in range(horizon):
         action, _, dist = actor(latent.detach(), deterministic=False)
         imagined_actions.append(action)
-        imagined_log_probs.append(dist.log_prob(action.detach()).sum(dim=-1))
-        imagined_entropies.append(dist.entropy().sum(dim=-1))
+        # The bounded-normal actor uses a joint-event distribution whose
+        # log-probability and entropy are already reduced over action joints.
+        imagined_log_probs.append(dist.log_prob(action.detach()))
+        imagined_entropies.append(dist.entropy())
 
         with torch.no_grad():
             latent, recurrent_state, _ = rssm.imagine_step(
