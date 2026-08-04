@@ -214,8 +214,11 @@ def train_dreamer():
                     context_recurrent=replay_context_recurrent[i : i + 1],
                 )
 
-            # Step environment
-            next_obs, rewards, terminations, truncations, infos = env.step(action)
+            # Match official DreamerV3's ClipAction wrapper: keep the raw
+            # Normal sample for replay, policy likelihoods, and prev_action,
+            # while sending only native action-space values to MuJoCo.
+            env_action = np.clip(action, -1.0, 1.0)
+            next_obs, rewards, terminations, truncations, infos = env.step(env_action)
             episode_end = terminations | truncations
             # # TODO: Remove this
             # mean_action_distance_from_center = float(np.mean(np.abs(action - 0.5)))
@@ -496,6 +499,30 @@ def train_dreamer():
                             {
                                 "train/policy_loss": actor_loss_value,
                                 "train/value_loss": critic_loss_value,
+                                "train/critic_imagined_return_loss": ac_metrics.get(
+                                    "actor_critic/critic_return_loss", 0.0
+                                ),
+                                "train/critic_imagined_slow_loss": ac_metrics.get(
+                                    "actor_critic/critic_slow_loss", 0.0
+                                ),
+                                "train/critic_imagined_loss": ac_metrics.get(
+                                    "actor_critic/critic_imagined_loss", 0.0
+                                ),
+                                "train/critic_imagined_weighted_loss": ac_metrics.get(
+                                    "actor_critic/critic_imagined_weighted_loss", 0.0
+                                ),
+                                "train/critic_replay_return_loss": ac_metrics.get(
+                                    "actor_critic/critic_replay_return_loss", 0.0
+                                ),
+                                "train/critic_replay_slow_loss": ac_metrics.get(
+                                    "actor_critic/critic_replay_slow_loss", 0.0
+                                ),
+                                "train/critic_replay_loss": ac_metrics.get(
+                                    "actor_critic/critic_replay_loss", 0.0
+                                ),
+                                "train/critic_replay_weighted_loss": ac_metrics.get(
+                                    "actor_critic/critic_replay_weighted_loss", 0.0
+                                ),
                                 "train/entropy": ac_metrics.get(
                                     "actor_critic/entropy", 0.0
                                 ),

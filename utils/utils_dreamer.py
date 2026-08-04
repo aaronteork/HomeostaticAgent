@@ -391,8 +391,9 @@ def imagination_rollout(
     for step in range(horizon):
         action, _, dist = actor(latent.detach(), deterministic=False)
         imagined_actions.append(action)
-        # The bounded-normal actor uses a joint-event distribution whose
-        # log-probability and entropy are already reduced over action joints.
+        # The upstream bounded-normal actor uses a joint-event Independent
+        # Normal whose log-probability and entropy are already reduced over
+        # action joints. The RSSM bounds the raw sample internally.
         imagined_log_probs.append(dist.log_prob(action.detach()))
         imagined_entropies.append(dist.entropy())
 
@@ -653,11 +654,15 @@ def compute_actor_critic_loss(
     critic_imagined_loss = (
         critic_return_loss + config.critic_slow_regularization * critic_slow_loss
     )
-    critic_loss = config.critic_imagined_loss * critic_imagined_loss
+    critic_imagined_weighted_loss = (
+        config.critic_imagined_loss * critic_imagined_loss
+    )
+    critic_loss = critic_imagined_weighted_loss
 
     replay_loss = torch.zeros((), device=latents.device)
     replay_return_loss = torch.zeros((), device=latents.device)
     replay_slow_loss = torch.zeros((), device=latents.device)
+    replay_weighted_loss = torch.zeros((), device=latents.device)
     replay_returns = None
     if replay_trajectories is not None and config.critic_replay_loss > 0.0:
         start_batch_size = imagined_trajectories.get("start_batch_size")
@@ -680,17 +685,22 @@ def compute_actor_critic_loss(
                 config,
             )
         )
-        critic_loss = critic_loss + config.critic_replay_loss * replay_loss
+        replay_weighted_loss = config.critic_replay_loss * replay_loss
+        critic_loss = critic_loss + replay_weighted_loss
 
     metrics = {
         "actor_critic/actor_loss": actor_loss.item(),
         "actor_critic/critic_loss": critic_loss.item(),
-        # "actor_critic/critic_return_loss": critic_return_loss.item(),
-        # "actor_critic/critic_slow_loss": critic_slow_loss.item(),
-        # "actor_critic/critic_imagined_loss": critic_imagined_loss.item(),
-        # "actor_critic/critic_replay_loss": replay_loss.item(),
-        # "actor_critic/critic_replay_return_loss": replay_return_loss.item(),
-        # "actor_critic/critic_replay_slow_loss": replay_slow_loss.item(),
+        "actor_critic/critic_return_loss": critic_return_loss.item(),
+        "actor_critic/critic_slow_loss": critic_slow_loss.item(),
+        "actor_critic/critic_imagined_loss": critic_imagined_loss.item(),
+        "actor_critic/critic_imagined_weighted_loss": (
+            critic_imagined_weighted_loss.item()
+        ),
+        "actor_critic/critic_replay_loss": replay_loss.item(),
+        "actor_critic/critic_replay_return_loss": replay_return_loss.item(),
+        "actor_critic/critic_replay_slow_loss": replay_slow_loss.item(),
+        "actor_critic/critic_replay_weighted_loss": replay_weighted_loss.item(),
         "actor_critic/entropy": entropy.item(),
         # "actor_critic/actor_objective": actor_objective.item(),
         # "actor_critic/average_return": critic_returns.mean().item(),

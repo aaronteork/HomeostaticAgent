@@ -6,9 +6,9 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.distributions import (
     Independent,
+    Normal,
     OneHotCategoricalStraightThrough,
 )
-from torchrl.modules import TruncatedNormal
 
 from configs.config_dreamer import DreamerConfig
 from utils.utils_dreamer import (
@@ -280,6 +280,10 @@ class BlockGRUCell(nn.Module):
 
     def forward(self, stoch: Tensor, deter: Tensor, action: Tensor) -> Tensor:
         stoch = stoch.reshape(*stoch.shape[:-2], self.stoch_size)
+        # Official DreamerV3 and R2-Dreamer keep the policy sample unbounded
+        # for its Normal log-probability, but bound each action coordinate
+        # before it enters the learned dynamics.
+        action = action / torch.clamp(torch.abs(action), min=1.0).detach()
 
         global_features = torch.cat(
             [
@@ -562,9 +566,10 @@ class ActorNetwork(nn.Module):
             config, input_dim=input_dim, output_dim=config.hidden_dim, num_layers=3
         )
 
-        # DreamerV3 bounded-normal policy parameters. The distribution is
-        # represented in this project's wrapped [0, 1] action coordinates;
-        # RescaleAction maps those actions back to the Ant's native [-1, 1].
+        # DreamerV3 bounded-normal policy parameters in the Ant's native
+        # [-1, 1] action coordinates. "Bounded" refers to the tanh-bounded
+        # mean; stochastic Normal samples remain unbounded and are clipped at
+        # the environment and RSSM boundaries, as in the upstream code.
         self.mean_head = nn.Linear(config.hidden_dim, action_dim)
         self.std_head = nn.Linear(config.hidden_dim, action_dim)
 
@@ -608,22 +613,17 @@ class ActorNetwork(nn.Module):
         loc = torch.tanh(raw_mean)  # bounded center in [-1, 1]
         std = self.config.actor_min_std + (
             self.config.actor_max_std - self.config.actor_min_std
-        ) * torch.sigmoid(raw_std)
+        ) * torch.sigmoid(raw_std + 2.0)
 
-        dist = TruncatedNormal(
-            loc=loc,
-            scale=std,
-            low=-1.0,
-            high=1.0,
-        )
+        dist = Independent(Normal(loc=loc, scale=std), 1)
 
         if deterministic:
             action = dist.mode
         else:
             action = dist.rsample()
 
-        # TorchRL's TruncatedNormal treats the final action dimension as one
-        # event, so log_prob and entropy are already joint over all joints.
+        # Independent treats the final action dimension as one event, so
+        # log_prob and entropy are already joint over all joints.
         log_prob = dist.log_prob(action)
 
         if squeeze_output:
