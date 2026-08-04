@@ -269,7 +269,7 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
         # Posture dynamics - Deviation from upright
         # Using Euler angles (roll, pitch) to calculate tilt
         # data.qpos[3:7] is torso orientation (w, x, y, z)
-        return np.square(qtoeuler(self.data.qpos[3:7])[:2] - qtoeuler([1.0, 0.0, 0.0, 0.0])[:2]).sum()
+        return np.linalg.norm(qtoeuler(self.data.qpos[3:7])[:2] - qtoeuler([1.0, 0.0, 0.0, 0.0])[:2])
 
     def _generate_new_object(self, type_gen):
         existing = set()
