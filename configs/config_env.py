@@ -7,7 +7,7 @@ from configs.config_base import BaseConfig
 class EnvConfig(BaseConfig):
     xml_path: str = "ant_env.xml"
     env_name: str = "HomeostaticAntEnv"
-    max_steps: int = 60_000
+    max_steps: float = float("inf")
     image_size: tuple[int, int] = (64, 64)
     num_workers: int = 16
     arena_size: float = 6.0
