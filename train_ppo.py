@@ -48,7 +48,7 @@ def train_ppo():
     torch.set_float32_matmul_precision('high') 
     agent = HomeostaticPPO(cfg)
     agent.to(cfg.device)
-    agent = torch.compile(agent)
+    agent = torch.compile(agent, dynamic=False)
     optimizer = Adam(agent.parameters(), lr=cfg.lr_start, eps=cfg.adam_eps)
     scheduler = LinearLR(optimizer, start_factor=1.0, end_factor=0.1, total_iters=cfg.total_updates)
     logger.info("Created PPO agent and optimizer")
@@ -61,7 +61,7 @@ def train_ppo():
     # SyncVectorEnv uses next-step autoreset in this project. After an episode
     # boundary, the next env.step() ignores that worker's action and only
     # returns its reset observation. Keep the row for temporal alignment and
-    # truncation bootstrapping, but exclude it from PPO optimization.
+    # final-observation bootstrapping, but exclude it from PPO optimization.
     reset_only = np.zeros(cfg.num_workers, dtype=bool)
     # PPO iterations
     with mlflow.start_run(run_name="PPO Training - " + dt.datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d_%H-%M-%S")):
@@ -86,6 +86,7 @@ def train_ppo():
                     raise RuntimeError("NaN/Inf detected in actions")
 
                 next_obs, rewards, terminations, truncations, infos = env.step(actions)
+                episode_ends = terminations | truncations
                 valid = ~reset_only
                 add_to_replay_buffer(
                     replay_buffer,
@@ -93,8 +94,7 @@ def train_ppo():
                     actions,
                     log_prob,
                     rewards,
-                    terminations,
-                    truncations,
+                    episode_ends,
                     valid,
                     value,
                 )
@@ -108,7 +108,7 @@ def train_ppo():
                 # Next step and global step update
                 obs = next_obs
                 global_step += int(valid.sum())
-                reset_only = (terminations | truncations).astype(bool, copy=True)
+                reset_only = episode_ends.astype(bool, copy=True)
 
                 # Track metrics
                 if "_episode" in infos:
@@ -135,8 +135,7 @@ def train_ppo():
             trajectory_for_gae = {
                 "rewards": trajectory["rewards"].to(cfg.device),
                 "values": trajectory["values"].to(cfg.device),
-                "terminations": trajectory["terminated"].to(cfg.device),
-                "truncations": trajectory["truncated"].to(cfg.device),
+                "episode_ends": trajectory["episode_end"].to(cfg.device),
                 "valid": trajectory["valid"].to(cfg.device),
             }
 
@@ -146,8 +145,7 @@ def train_ppo():
                 rewards=trajectory_reshaped["rewards"],
                 values=trajectory_reshaped["values"],
                 next_obs=obs,
-                terminations=trajectory_reshaped["terminations"],
-                truncations=trajectory_reshaped["truncations"],
+                episode_ends=trajectory_reshaped["episode_ends"],
                 agent=agent,
                 gamma=cfg.gamma,
                 lam=cfg.gae_lambda

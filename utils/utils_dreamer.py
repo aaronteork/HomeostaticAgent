@@ -214,8 +214,9 @@ def compute_world_model_loss(
         obs: dict of observation targets
         is_first: (batch, seq_len)
         reward: (batch, seq_len) - target rewards
-        terminal: (batch, seq_len) - true environmental terminal targets;
-            time-limit truncations remain nonterminal
+        terminal: (batch, seq_len) - absorbing value-terminal targets. The
+            homeostatic task has no absorbing value terminals, so these targets
+            remain false even when an episode resets.
         config: DreamerConfig
 
     Returns:
@@ -360,7 +361,6 @@ def imagination_rollout(
     rssm,
     actor,
     reward_predictor,
-    continue_predictor,
     init_latent,
     init_recurrent_state,
     config: DreamerConfig,
@@ -379,7 +379,6 @@ def imagination_rollout(
         rssm: RSSM model
         actor: Actor network
         reward_predictor: Reward predictor network
-        continue_predictor: Continue predictor network
         init_latent: (batch, latent_dim) - posterior latent from real obs
         init_recurrent_state: (batch, gru_units)
         config: DreamerConfig
@@ -401,14 +400,16 @@ def imagination_rollout(
     imagined_entropies = []
     imagined_log_probs = []
 
-    # Official DreamerV3 includes continuation at the replay start when
-    # constructing cumulative actor/value loss weights. This masks imagined
-    # losses that start from terminal posterior states. Keep the factor in the
-    # same discounted convention as successor continuation factors.
-    with torch.no_grad():
-        start_continue = continue_predictor(latent).squeeze(-1)
-        if not config.contdisc:
-            start_continue = start_continue * config.gamma
+    # The reference homeostatic setup resets episodes without providing an
+    # absorbing terminal signal. Use the configured discount directly so an
+    # untrained continuation head cannot introduce artificial zero-value deaths
+    # during imagination.
+    start_continue = torch.full(
+        (latent.shape[0],),
+        config.discount,
+        device=latent.device,
+        dtype=latent.dtype,
+    )
 
     for step in range(horizon):
         action, _, dist = actor(latent.detach(), deterministic=False)
@@ -430,12 +431,14 @@ def imagination_rollout(
             imagined_latents.append(latent)
             reward_dist = reward_predictor(latent)
             imagined_rewards.append(reward_dist.mode.squeeze(-1))
-            continue_head_output = continue_predictor(latent)
-            if config.contdisc:
-                continue_factor = continue_head_output
-            else:
-                continue_factor = continue_head_output * config.gamma
-            imagined_continues.append(continue_factor.squeeze(-1))
+            imagined_continues.append(
+                torch.full(
+                    (latent.shape[0],),
+                    config.discount,
+                    device=latent.device,
+                    dtype=latent.dtype,
+                )
+            )
 
     imagined_latents = torch.stack(
         imagined_latents, dim=1
@@ -492,15 +495,57 @@ def compute_discount_weights_from_continues(
     return discount_weights
 
 
+def select_nonboundary_imagination_starts(latents, is_last):
+    """Flatten replay states while excluding final pre-reset observations."""
+    if latents.ndim != 3:
+        raise ValueError("latents must have shape (batch, time, features)")
+    if is_last.shape != latents.shape[:2]:
+        raise ValueError("is_last must match the batch and time dimensions of latents")
+
+    start_mask = ~is_last.detach().bool()
+    starts = latents.detach().reshape(-1, latents.shape[-1])[
+        start_mask.reshape(-1)
+    ]
+    return starts, start_mask
+
+
+def assemble_replay_bootstraps(
+    critic, replay_latents, imagined_start_returns, imagination_start_mask
+):
+    """Combine imagined annotations with direct values at reset boundaries.
+
+    Non-boundary replay states use the return from an imagination rollout.
+    States marked ``is_last`` never start imagination and retain the critic's
+    direct ``V(s_final)`` prediction instead.
+    """
+    if imagination_start_mask.shape != replay_latents.shape[:2]:
+        raise ValueError(
+            "imagination_start_mask must match replay latent batch/time dimensions"
+        )
+    expected_starts = int(imagination_start_mask.sum().item())
+    if imagined_start_returns.numel() != expected_starts:
+        raise ValueError(
+            "imagined_start_returns must contain one value per selected start"
+        )
+
+    with torch.no_grad():
+        direct_values = critic(replay_latents.detach()).mode.squeeze(-1).detach()
+        bootstraps = direct_values.reshape(-1).clone()
+        bootstraps[imagination_start_mask.reshape(-1)] = (
+            imagined_start_returns.detach().reshape(-1)
+        )
+    return bootstraps.view(replay_latents.shape[:2])
+
+
 def compute_replay_lambda_returns(
     rewards, terminals, is_last, imagination_bootstraps, config
 ):
     """Return imagination-annotated replay targets without crossing boundaries.
 
-    True terminals suppress bootstrapping. Truncated ``is_last`` rows stop the
-    lambda trace but retain the one-step imagination bootstrap from their final
-    observation. Each replay state has its own imagination return annotation,
-    matching DreamerV3/R2Dreamer replay value learning.
+    True terminals suppress bootstrapping. Nonterminal ``is_last`` rows stop
+    the lambda trace but retain a one-step bootstrap from their final
+    observation. The caller supplies a direct critic value at such boundaries
+    and imagination-return annotations at ordinary replay states.
     """
     if rewards.shape[1] < 2:
         raise ValueError("Replay value loss needs at least two timesteps")
@@ -693,10 +738,28 @@ def compute_actor_critic_loss(
             raise ValueError(
                 "imagined_trajectories must include start_batch_size and start_count for replay value loss"
             )
-        replay_bootstraps = (
-            critic_returns[:, 0]
-            .detach()
-            .view(start_batch_size, start_count)
+        imagination_start_mask = imagined_trajectories.get(
+            "imagination_start_mask"
+        )
+        if imagination_start_mask is None:
+            # Backward-compatible all-state mapping for callers that construct
+            # imagined trajectories directly (there are no excluded starts).
+            imagination_start_mask = torch.ones(
+                start_batch_size,
+                start_count,
+                dtype=torch.bool,
+                device=critic_returns.device,
+            )
+        if imagination_start_mask.shape != (start_batch_size, start_count):
+            raise ValueError(
+                "imagination_start_mask must have shape "
+                f"({start_batch_size}, {start_count})"
+            )
+        replay_bootstraps = assemble_replay_bootstraps(
+            critic,
+            replay_trajectories["latents"],
+            critic_returns[:, 0],
+            imagination_start_mask,
         )
         replay_loss, replay_return_loss, replay_slow_loss, replay_returns = (
             compute_replay_value_loss(

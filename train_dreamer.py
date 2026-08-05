@@ -19,6 +19,7 @@ from utils.utils_dreamer import (
     imagination_rollout,
     obs_to_tensor_dict,
     prepare_sequence_batch,
+    select_nonboundary_imagination_starts,
     set_requires_grad,
     to_tensor,
 )
@@ -201,7 +202,9 @@ def train_dreamer():
             #   Current observation
             #   Action taken because of the current observation
             #   The reward from the previous action that led to this state
-            #   If the current observation is done/terminal??  # Yes
+            #   Whether the incoming transition is an absorbing value terminal.
+            #   Homeostatic episode endings are reset boundaries, not value
+            #   terminals, so this remains false.
             #   The is_first flag for the current observation
             #   Posterior RSSM entry after observing the current observation.
             for i in range(cfg.num_workers):
@@ -237,7 +240,11 @@ def train_dreamer():
             obs = next_obs
             next_is_first = current_is_last
             replay_reward = rewards.astype(np.float32, copy=True)
-            replay_terminal = terminations.astype(bool, copy=True)
+            # Match Appendix A of the homeostatic reference paper: reset the
+            # environment at a homeostatic limit without assigning zero value
+            # to the final observation. ``is_last`` below still cuts replay
+            # traces at the reset boundary.
+            replay_terminal = np.zeros_like(terminations, dtype=bool)
             replay_is_last = episode_end.astype(bool, copy=True)
             replay_reward[next_is_first] = 0.0
             replay_terminal[next_is_first] = False
@@ -248,7 +255,7 @@ def train_dreamer():
             prev_action = to_tensor(prev_action_np, cfg.device)
             is_first = to_tensor(next_is_first, cfg.device)
             # Reset the live RSSM state only for rows that are actually reset
-            # observations. Terminal observations are consumed on the next loop
+            # observations. Final observations are consumed on the next loop
             # with is_first=False so reward/continue can learn from their
             # posterior latent.
             recurrent_state = recurrent_state * (1.0 - is_first.unsqueeze(-1))
@@ -382,9 +389,15 @@ def train_dreamer():
                     replay_rewards = ac_rewards[:, -start_count:]
                     replay_terminals = ac_terminals[:, -start_count:]
                     replay_last_rows = ac_is_last[:, -start_count:]
-                    init_latent = replay_latents.detach().reshape(
-                        ac_batch_size * start_count, -1
+                    init_latent, imagination_start_mask = (
+                        select_nonboundary_imagination_starts(
+                            replay_latents, replay_last_rows
+                        )
                     )
+                    if init_latent.shape[0] == 0:
+                        raise RuntimeError(
+                            "Replay batch contains no non-boundary states for imagination"
+                        )
                     _, init_recurrent_state = world_model.rssm.split_feature(
                         init_latent
                     )
@@ -394,13 +407,15 @@ def train_dreamer():
                             world_model.rssm,
                             actor,
                             world_model.reward_predictor,
-                            world_model.continue_predictor,
                             init_latent,
                             init_recurrent_state,
                             cfg,
                         )
                         imagined_trajectories["start_batch_size"] = ac_batch_size
                         imagined_trajectories["start_count"] = start_count
+                        imagined_trajectories["imagination_start_mask"] = (
+                            imagination_start_mask
+                        )
                         replay_trajectories = {
                             "latents": replay_latents,
                             "rewards": replay_rewards,

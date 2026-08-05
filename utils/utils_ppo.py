@@ -25,8 +25,7 @@ def add_to_replay_buffer(
     action,
     log_prob,
     reward,
-    terminated,
-    truncated,
+    episode_end,
     valid,
     value,
 ):
@@ -43,8 +42,7 @@ def add_to_replay_buffer(
             "actions": action,
             "log_probs": log_prob,
             "rewards": reward,
-            "terminated": terminated,
-            "truncated": truncated,
+            "episode_end": episode_end,
             "valid": valid,
             "values": value,
         },
@@ -58,8 +56,7 @@ def compute_gae_from_buffer(
     rewards,
     values,
     next_obs,
-    terminations,
-    truncations,
+    episode_ends,
     agent,
     gamma=0.99,
     lam=0.95,
@@ -71,9 +68,9 @@ def compute_gae_from_buffer(
         rewards: Tensor (T, N)
         values: Tensor (T, N) or (T, N, 1)
         next_obs: Dictionary containing vision, proprioception, internal_state of shape (N, ...)
-        terminations: Tensor (T, N), true absorbing terminals
-        truncations: Tensor (T, N), nonterminal episode boundaries such as
-            time limits
+        episode_ends: Tensor (T, N), reset boundaries. Homeostatic episode
+            endings are nonterminal for value bootstrapping but stop the GAE
+            trace from entering the reset episode.
         agent: The model used to get the final 'next_value'
         gamma: Discount factor
         lam: GAE lambda
@@ -95,8 +92,7 @@ def compute_gae_from_buffer(
     num_workers = rewards.shape[1] if len(rewards.shape) > 1 else 1
     lastgaelam = torch.zeros(num_workers, device=rewards.device, dtype=rewards.dtype)
 
-    terminations = terminations.float()
-    truncations = truncations.float()
+    episode_ends = episode_ends.float()
 
     # print(f"[DEBUG GAE] rewards shape: {rewards.shape}, values shape: {values.shape}, dones shape: {dones.shape}")
 
@@ -107,16 +103,15 @@ def compute_gae_from_buffer(
         else:
             nextvalues = values[t + 1]
 
-        # A true terminal suppresses value bootstrapping. A time-limit
-        # truncation still bootstraps from its final observation, but both
-        # kinds of episode boundary stop the GAE trace from entering the next
-        # episode.
-        bootstrap_mask = 1.0 - terminations[t]
-        trace_mask = 1.0 - torch.maximum(terminations[t], truncations[t])
+        # Appendix A of the homeostatic reference paper resets the environment
+        # without sending a terminal signal to PPO. Therefore every episode
+        # boundary bootstraps from its final observation, while the boundary
+        # still stops the GAE trace from entering the reset episode.
+        trace_mask = 1.0 - episode_ends[t]
         # if t == rollout_steps - 1:
         #     print(f"[DEBUG GAE] t={t}: nextvalues shape={nextvalues.shape}, nextnonterminal shape={nextnonterminal.shape}, values[t] shape={values[t].shape}")
             
-        delta = rewards[t] + gamma * nextvalues * bootstrap_mask - values[t]
+        delta = rewards[t] + gamma * nextvalues - values[t]
         advantages[t] = lastgaelam = (
             delta + gamma * lam * trace_mask * lastgaelam
         )
