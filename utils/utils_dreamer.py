@@ -261,6 +261,11 @@ def compute_world_model_loss(
     free_nats = torch.tensor(config.free_nats, device=prev_action.device)
     dyn_loss = torch.tensor(0.0, device=prev_action.device)
     rep_loss = torch.tensor(0.0, device=prev_action.device)
+    raw_kl_sum = torch.tensor(0.0, device=prev_action.device)
+    kl_item_count = 0
+    free_nats_count = 0
+    prior_entropy = torch.tensor(0.0, device=prev_action.device)
+    posterior_entropy = torch.tensor(0.0, device=prev_action.device)
 
     for prior_dist, posterior_dist in zip(prior_dists, posterior_dists):
         prior_logits = prior_dist.base_dist.logits
@@ -272,9 +277,20 @@ def compute_world_model_loss(
         rep_kl = kl_divergence(posterior_dist, prior_sg)
         dyn_loss = dyn_loss + torch.maximum(dyn_kl, free_nats).mean()
         rep_loss = rep_loss + torch.maximum(rep_kl, free_nats).mean()
+        # Stop-gradient changes only gradients, not forward values, so dyn_kl
+        # and rep_kl have the same numeric value. Log it once as raw_kl.
+        raw_kl_sum = raw_kl_sum + dyn_kl.detach().sum()
+        kl_item_count += dyn_kl.numel()
+        free_nats_count += (dyn_kl.detach() < config.free_nats).sum().item()
+        prior_entropy = prior_entropy + prior_dist.entropy().mean()
+        posterior_entropy = posterior_entropy + posterior_dist.entropy().mean()
 
     dyn_loss = dyn_loss / len(prior_dists)
     rep_loss = rep_loss / len(prior_dists)
+    raw_kl = raw_kl_sum / kl_item_count
+    free_nats_fraction = free_nats_count / kl_item_count
+    prior_entropy = prior_entropy / len(prior_dists)
+    posterior_entropy = posterior_entropy / len(posterior_dists)
 
     # ===== Reward Prediction Loss =====
     # Replay rows follow the Dreamer convention: latent_t is built from
@@ -309,20 +325,26 @@ def compute_world_model_loss(
     )
 
     metrics = {
-        # "world_model/reconstruction_loss": recon_loss.item(),
-        # "world_model/reconstruction_vision_loss": recon_losses["vision"].item(),
-        # "world_model/reconstruction_proprioception_loss": recon_losses[
-        #     "proprioception"
-        # ].item(),
-        # "world_model/reconstruction_internal_state_loss": recon_losses[
-        #     "internal_state"
-        # ].item(),
+        "world_model/total_loss": loss.item(),
+        "world_model/reconstruction_loss": recon_loss.item(),
+        "world_model/reconstruction_vision_loss": recon_losses["vision"].item(),
+        "world_model/reconstruction_proprioception_loss": recon_losses[
+            "proprioception"
+        ].item(),
+        "world_model/reconstruction_internal_state_loss": recon_losses[
+            "internal_state"
+        ].item(),
         "world_model/dyn_loss": dyn_loss.item(),
         "world_model/rep_loss": rep_loss.item(),
-        # "world_model/reward_loss": reward_loss.item(),
-        # "world_model/continue_loss": continue_loss.item(),
-        # "world_model/predicted_continue": predicted_continue.mean().item(),
-        # "world_model/total_loss": loss.item(),
+        "world_model/raw_kl": raw_kl.item(),
+        "world_model/free_nats_fraction": free_nats_fraction,
+        "world_model/prior_entropy": prior_entropy.item(),
+        "world_model/posterior_entropy": posterior_entropy.item(),
+        "world_model/reward_loss": reward_loss.item(),
+        "world_model/continue_loss": continue_loss.item(),
+        "world_model/predicted_continue": torch.sigmoid(
+            predicted_continue_logits
+        ).mean().item(),
     }
     if "heat_sensor" in recon_losses:
         metrics["world_model/reconstruction_heat_sensor_loss"] = recon_losses[

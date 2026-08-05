@@ -54,7 +54,16 @@ def train_dreamer():
     # Create world model
     torch.set_float32_matmul_precision("high")
     world_model = WorldModel(cfg).to(cfg.device)
-    world_model = torch.compile(world_model, dynamic=True)
+    world_model.encoder = torch.compile(world_model.encoder, dynamic=False)
+    world_model.rssm = torch.compile(world_model.rssm, dynamic=False)
+    world_model.decoder = torch.compile(world_model.decoder, dynamic=False)
+    world_model.reward_predictor = torch.compile(
+        world_model.reward_predictor, dynamic=False
+    )
+    world_model.continue_predictor = torch.compile(
+        world_model.continue_predictor, dynamic=False
+    )
+
     logger.info("Created world model")
 
     # Create actor-critic
@@ -74,8 +83,8 @@ def train_dreamer():
         percentile_high=cfg.return_norm_percentile_high,
         device=cfg.device,
     )
-    actor = torch.compile(actor, dynamic=True)
-    critic = torch.compile(critic, dynamic=True)
+    actor = torch.compile(actor, dynamic=False)
+    critic = torch.compile(critic, dynamic=False)
     logger.info("Created actor, critic, and EMA critic networks")
 
     # Create model save timestamp
@@ -119,6 +128,7 @@ def train_dreamer():
     logger.info("Starting training loop")
     global_step = 0
     episodes_finished = 0
+    next_training_metrics_step = 0
     obs, info = env.reset()
     prev_action = torch.zeros(cfg.num_workers, cfg.action_space_dim, device=cfg.device)
     is_first = torch.ones(cfg.num_workers, device=cfg.device)
@@ -257,6 +267,7 @@ def train_dreamer():
             num_ac_updates = 0
             train_batches_due = 0
             wm_sample_failures = 0
+            wm_metrics = {}
             # last_actor_grad_norm = 0.0
             # avg_reward_loss = 0.0
             # avg_continue_loss = 0.0
@@ -280,9 +291,7 @@ def train_dreamer():
                 world_model.train()
 
                 total_wm_loss = 0
-                # total_reconstruction_loss = 0
-                # total_reward_loss = 0
-                # total_continue_loss = 0
+                total_wm_metrics = {}
                 total_replay_terminal_count = 0.0
                 total_replay_terminal_items = 0
                 total_actor_loss = 0.0
@@ -337,9 +346,8 @@ def train_dreamer():
                         )
 
                     total_wm_loss += wm_loss.item()
-                    # total_reconstruction_loss += wm_metrics['world_model/reconstruction_loss']
-                    # total_reward_loss += wm_metrics['world_model/reward_loss']
-                    # total_continue_loss += wm_metrics['world_model/continue_loss']
+                    for key, value in wm_metrics.items():
+                        total_wm_metrics[key] = total_wm_metrics.get(key, 0.0) + value
                     num_wm_updates += 1
 
                     # Train actor-critic from the same replay batch used for
@@ -451,6 +459,24 @@ def train_dreamer():
                         key: value / num_ac_updates
                         for key, value in total_ac_metrics.items()
                     }
+                if num_wm_updates > 0:
+                    wm_metrics = {
+                        key: value / num_wm_updates
+                        for key, value in total_wm_metrics.items()
+                    }
+                    # These are update-averaged and use global environment
+                    # steps, unlike episode metrics below. They provide a
+                    # stable training diagnostic even when episodes are long.
+                    if global_step >= next_training_metrics_step:
+                        mlflow.log_metrics(
+                            {
+                                f"train_update/{key.removeprefix('world_model/')}": value
+                                for key, value in wm_metrics.items()
+                            },
+                            step=global_step,
+                        )
+                        while global_step >= next_training_metrics_step:
+                            next_training_metrics_step += cfg.train_metrics_interval
                 # if total_replay_terminal_items > 0:
                 #     replay_terminal_rate = (
                 #         total_replay_terminal_count / total_replay_terminal_items

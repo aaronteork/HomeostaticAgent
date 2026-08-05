@@ -17,6 +17,7 @@ class DreamerConfig(EnvConfig):
     batch_length: int = 64
     total_env_steps: int = 3_000_000
     replay_ratio: int = 64   # Was originally 512 to follow the paper for visual control but reduced 32 to match Minecraft since one episode is quite long too (to decay)
+    train_metrics_interval: int = 10_000
     # total_updates: int = 1_000
     adam_eps: float = 1e-5
     laprop_eps: float = 1e-20
@@ -84,6 +85,8 @@ class DreamerConfig(EnvConfig):
     def __post_init__(self):
         if self.replay_context < 0:
             raise ValueError("replay_context must be non-negative")
+        if self.train_metrics_interval <= 0:
+            raise ValueError("train_metrics_interval must be positive")
         if not 0.0 < self.actor_min_std <= self.actor_max_std:
             raise ValueError(
                 "actor standard deviations must satisfy "
