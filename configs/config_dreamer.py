@@ -16,8 +16,15 @@ class DreamerConfig(EnvConfig):
     batch_size: int = 16
     batch_length: int = 64
     total_env_steps: int = 3_000_000
-    replay_ratio: int = 64   # Was originally 512 to follow the paper for visual control but reduced 32 to match Minecraft since one episode is quite long too (to decay)
-    train_metrics_interval: int = 10_000
+    replay_ratio: int = 32
+    # Keep scalar diagnostics useful without making SQLite telemetry a material
+    # part of the training loop.  The deterministic probe is deliberately
+    # sparse: it runs extra MuJoCo rollouts outside the training trajectory.
+    train_metrics_interval: int = 25_000
+    rollout_metrics_interval: int = 50_000
+    per_joint_metrics_interval: int = 500_000
+    deterministic_probe_interval: int = 1_000_000
+    deterministic_probe_steps: int = 500
     # total_updates: int = 1_000
     adam_eps: float = 1e-5
     laprop_eps: float = 1e-20
@@ -87,6 +94,16 @@ class DreamerConfig(EnvConfig):
             raise ValueError("replay_context must be non-negative")
         if self.train_metrics_interval <= 0:
             raise ValueError("train_metrics_interval must be positive")
+        if self.comparison_metrics_interval <= 0:
+            raise ValueError("comparison_metrics_interval must be positive")
+        if self.rollout_metrics_interval <= 0:
+            raise ValueError("rollout_metrics_interval must be positive")
+        if self.per_joint_metrics_interval <= 0:
+            raise ValueError("per_joint_metrics_interval must be positive")
+        if self.deterministic_probe_interval <= 0:
+            raise ValueError("deterministic_probe_interval must be positive")
+        if self.deterministic_probe_steps <= 0:
+            raise ValueError("deterministic_probe_steps must be positive")
         if not 0.0 < self.actor_min_std <= self.actor_max_std:
             raise ValueError(
                 "actor standard deviations must satisfy "

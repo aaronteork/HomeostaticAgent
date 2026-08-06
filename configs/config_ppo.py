@@ -24,5 +24,7 @@ class PPOConfig(EnvConfig):
     image_latent_dim: int = 200
 
     def __post_init__(self):
+        if self.comparison_metrics_interval <= 0:
+            raise ValueError("comparison_metrics_interval must be positive")
         temp_batch_size = self.rollout_steps * self.num_workers
         object.__setattr__(self, 'batch_size', temp_batch_size)

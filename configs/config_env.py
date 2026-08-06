@@ -10,6 +10,9 @@ class EnvConfig(BaseConfig):
     max_steps: float = float("inf")
     image_size: tuple[int, int] = (64, 64)
     num_workers: int = 16
+    # A coarse survival heartbeat is sufficient for cross-trainer comparisons
+    # and avoids frequent synchronous SQLite writes.
+    comparison_metrics_interval: int = 50_000
     arena_size: float = 6.0
     shift: bool = False
     day_night_cycle_len: int = 1

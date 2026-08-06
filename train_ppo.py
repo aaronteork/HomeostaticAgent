@@ -48,7 +48,7 @@ def train_ppo():
     torch.set_float32_matmul_precision('high') 
     agent = HomeostaticPPO(cfg)
     agent.to(cfg.device)
-    agent = torch.compile(agent, dynamic=False)
+    agent = torch.compile(agent, dynamic=True)
     optimizer = Adam(agent.parameters(), lr=cfg.lr_start, eps=cfg.adam_eps)
     scheduler = LinearLR(optimizer, start_factor=1.0, end_factor=0.1, total_iters=cfg.total_updates)
     logger.info("Created PPO agent and optimizer")
@@ -57,6 +57,12 @@ def train_ppo():
     logger.info("Running agent and environment")
     global_step = 0
     episodes_finished = 0
+    cumulative_episode_ends = 0
+    cumulative_homeostatic_terminations = 0
+    cumulative_truncations = 0
+    comparison_window_episode_ends = 0
+    comparison_window_transitions = 0
+    next_comparison_metrics_step = cfg.comparison_metrics_interval
     obs, info = env.reset()
     # SyncVectorEnv uses next-step autoreset in this project. After an episode
     # boundary, the next env.step() ignores that worker's action and only
@@ -66,6 +72,16 @@ def train_ppo():
     # PPO iterations
     with mlflow.start_run(run_name="PPO Training - " + dt.datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d_%H-%M-%S")):
         mlflow.log_params(asdict(cfg))
+        mlflow.log_metrics(
+            {
+                "comparison/env_transition_step": 0.0,
+                "comparison/cumulative_episode_ends": 0.0,
+                "comparison/cumulative_homeostatic_terminations": 0.0,
+                "comparison/cumulative_truncations": 0.0,
+                "comparison/episode_end_rate_per_million": 0.0,
+            },
+            step=0,
+        )
         for iterations in range(cfg.total_updates):
             # Rollout phase
             agent.eval()
@@ -107,8 +123,60 @@ def train_ppo():
 
                 # Next step and global step update
                 obs = next_obs
-                global_step += int(valid.sum())
+                valid_transition_count = int(valid.sum())
+                global_step += valid_transition_count
+                comparison_window_transitions += valid_transition_count
                 reset_only = episode_ends.astype(bool, copy=True)
+
+                episode_finished_mask = np.asarray(
+                    infos.get("_episode", np.zeros(cfg.num_workers, dtype=bool)),
+                    dtype=bool,
+                )
+                completed_this_step = int(episode_finished_mask.sum())
+                cumulative_episode_ends += completed_this_step
+                comparison_window_episode_ends += completed_this_step
+                cumulative_homeostatic_terminations += int(
+                    (
+                        episode_finished_mask
+                        & np.asarray(terminations, dtype=bool)
+                    ).sum()
+                )
+                cumulative_truncations += int(
+                    (episode_finished_mask & np.asarray(truncations, dtype=bool)).sum()
+                )
+                comparison_heartbeat_due = (
+                    global_step >= next_comparison_metrics_step
+                )
+                if completed_this_step or comparison_heartbeat_due:
+                    comparison_metrics = {
+                        "comparison/env_transition_step": float(global_step),
+                        "comparison/cumulative_episode_ends": float(
+                            cumulative_episode_ends
+                        ),
+                        "comparison/cumulative_homeostatic_terminations": float(
+                            cumulative_homeostatic_terminations
+                        ),
+                        "comparison/cumulative_truncations": float(
+                            cumulative_truncations
+                        ),
+                    }
+                    if comparison_heartbeat_due:
+                        comparison_metrics[
+                            "comparison/episode_end_rate_per_million"
+                        ] = (
+                            1_000_000.0
+                            * comparison_window_episode_ends
+                            / comparison_window_transitions
+                            if comparison_window_transitions
+                            else 0.0
+                        )
+                        comparison_window_episode_ends = 0
+                        comparison_window_transitions = 0
+                        while global_step >= next_comparison_metrics_step:
+                            next_comparison_metrics_step += (
+                                cfg.comparison_metrics_interval
+                            )
+                    mlflow.log_metrics(comparison_metrics, step=global_step)
 
                 # Track metrics
                 if "_episode" in infos:
@@ -126,6 +194,7 @@ def train_ppo():
                                     "episode/termination_reason": infos["termination_reason"][i],
                                     "episode/final_hunger": infos["hunger"][i],
                                     "episode/final_thirst": infos["thirst"][i],
+                                    "episode/env_transition_step": global_step,
                                 }, step=episodes_finished
                             )
             # Get the value of the very last observation in your rollout
@@ -308,6 +377,29 @@ def train_ppo():
             # Clear GPU cache to prevent memory accumulation
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+
+        if episodes_finished != cumulative_episode_ends:
+            raise RuntimeError(
+                "PPO episode counter mismatch: "
+                f"episode logs={episodes_finished}, comparison={cumulative_episode_ends}"
+            )
+        final_comparison_metrics = {
+            "comparison/env_transition_step": float(global_step),
+            "comparison/cumulative_episode_ends": float(cumulative_episode_ends),
+            "comparison/cumulative_homeostatic_terminations": float(
+                cumulative_homeostatic_terminations
+            ),
+            "comparison/cumulative_truncations": float(cumulative_truncations),
+        }
+        if comparison_window_transitions:
+            final_comparison_metrics[
+                "comparison/episode_end_rate_per_million"
+            ] = (
+                1_000_000.0
+                * comparison_window_episode_ends
+                / comparison_window_transitions
+            )
+        mlflow.log_metrics(final_comparison_metrics, step=global_step)
 
     model_path = f"./models/ppo_agent_{dt.datetime.now(ZoneInfo("Asia/Singapore")).strftime('%Y-%m-%d_%H-%M-%S')}.pt"
     torch.save(agent.state_dict(), model_path)

@@ -1,6 +1,6 @@
 import datetime as dt
+from dataclasses import asdict, replace
 from zoneinfo import ZoneInfo
-from dataclasses import asdict
 
 import mlflow
 import numpy as np
@@ -9,6 +9,7 @@ from torch.optim.lr_scheduler import LinearLR
 
 from configs.config_dreamer import DreamerConfig
 from utils.agc import agc
+from utils.episode_telemetry import EpisodeTelemetry, RolloutTelemetryWindow
 from utils.laprop import LaProp
 from utils.replay_buffer_dreamer import SequenceReplayBuffer
 from utils.utils_dreamer import (
@@ -26,6 +27,114 @@ from utils.utils_dreamer import (
 from utils.utils_env import create_env
 from utils.utils_logger import create_logger
 from utils.world_model import ActorNetwork, CriticNetwork, WorldModel
+
+
+def run_deterministic_stability_probe(world_model, actor, cfg):
+    """Run a fixed-length deterministic probe without modifying training state."""
+    probe_cfg = replace(cfg, is_training=False, max_steps=float("inf"))
+    probe_env = create_env(probe_cfg, multiple_env=True, rescale_action=False)
+    try:
+        obs, _ = probe_env.reset(seed=cfg.seed)
+        previous_action = torch.zeros(
+            cfg.num_workers, cfg.action_space_dim, device=cfg.device
+        )
+        is_first = torch.ones(cfg.num_workers, device=cfg.device)
+        recurrent_state = None
+        previous_stochastic = None
+        current_is_last = np.zeros(cfg.num_workers, dtype=bool)
+        episode_age = np.zeros(cfg.num_workers, dtype=np.int64)
+        first_flip_step = np.full(cfg.num_workers, -1, dtype=np.int64)
+        reward_sum = 0.0
+        valid_count = 0
+        episode_count = 0
+        postures = []
+        action_magnitudes = []
+        flipped_rows = []
+
+        for _ in range(cfg.deterministic_probe_steps):
+            with torch.inference_mode():
+                obs_embed = world_model.encode(obs_to_tensor_dict(obs, cfg))
+                latent, recurrent_state, _, _ = world_model.observe(
+                    previous_action,
+                    obs_embed,
+                    is_first,
+                    recurrent_state=recurrent_state,
+                    previous_stochastic=previous_stochastic,
+                    deterministic=True,
+                )
+                previous_stochastic, recurrent_state = world_model.rssm.split_feature(
+                    latent
+                )
+                action, _, _ = actor(latent, deterministic=True)
+                action = action.detach().cpu().numpy()
+
+            next_obs, rewards, terminations, truncations, infos = probe_env.step(action)
+            valid = ~current_is_last
+            indices = np.flatnonzero(valid)
+            episode_age[current_is_last] = 0
+            episode_age[indices] += 1
+            reward_sum += float(np.asarray(rewards)[indices].sum())
+            valid_count += int(indices.size)
+
+            if indices.size:
+                posture = np.asarray(infos["posture"], dtype=np.float64)
+                flipped = np.asarray(infos["is_flipped"], dtype=bool) & valid
+            else:
+                posture = np.zeros(cfg.num_workers, dtype=np.float64)
+                flipped = np.zeros(cfg.num_workers, dtype=bool)
+            postures.append(posture[indices])
+            action_magnitudes.append(np.linalg.norm(action[indices], axis=1))
+            flipped_rows.append(flipped[indices])
+            newly_flipped = flipped & (first_flip_step < 0)
+            first_flip_step[newly_flipped] = episode_age[newly_flipped]
+
+            episode_end = np.asarray(terminations) | np.asarray(truncations)
+            episode_count += int((episode_end & valid).sum())
+            next_is_first = current_is_last
+            previous_action_np = action.copy()
+            previous_action_np[next_is_first] = 0.0
+            previous_action = to_tensor(previous_action_np, cfg.device)
+            is_first = to_tensor(next_is_first, cfg.device)
+            recurrent_state = recurrent_state * (1.0 - is_first.unsqueeze(-1))
+            previous_stochastic = previous_stochastic * (
+                1.0 - is_first.view(-1, 1, 1)
+            )
+            current_is_last = episode_end.astype(bool, copy=True)
+            obs = next_obs
+
+        posture_values = np.concatenate(postures)
+        magnitude_values = np.concatenate(action_magnitudes)
+        flipped_values = np.concatenate(flipped_rows)
+        observed_first_flips = first_flip_step[first_flip_step >= 0]
+        return {
+            "deterministic_probe/reward_per_step": (
+                reward_sum / valid_count if valid_count else 0.0
+            ),
+            "deterministic_probe/posture_mean": float(posture_values.mean()),
+            "deterministic_probe/posture_p95": float(
+                np.percentile(posture_values, 95)
+            ),
+            "deterministic_probe/posture_max": float(posture_values.max()),
+            "deterministic_probe/action_magnitude_mean": float(
+                magnitude_values.mean()
+            ),
+            "deterministic_probe/action_magnitude_p95": float(
+                np.percentile(magnitude_values, 95)
+            ),
+            "deterministic_probe/flipped_transition_fraction": float(
+                flipped_values.mean()
+            ),
+            "deterministic_probe/workers_ever_flipped_fraction": float(
+                (first_flip_step >= 0).mean()
+            ),
+            "deterministic_probe/first_flip_step_mean": float(
+                observed_first_flips.mean() if observed_first_flips.size else -1.0
+            ),
+            "deterministic_probe/completed_episodes": float(episode_count),
+            "deterministic_probe/valid_transitions": float(valid_count),
+        }
+    finally:
+        probe_env.close()
 
 
 def train_dreamer():
@@ -85,7 +194,7 @@ def train_dreamer():
         device=cfg.device,
     )
     actor = torch.compile(actor, dynamic=False)
-    critic = torch.compile(critic, dynamic=False)
+    critic = torch.compile(critic, dynamic=True)
     logger.info("Created actor, critic, and EMA critic networks")
 
     # Create model save timestamp
@@ -128,8 +237,18 @@ def train_dreamer():
     # Training
     logger.info("Starting training loop")
     global_step = 0
+    env_transition_step = 0
     episodes_finished = 0
+    cumulative_episode_ends = 0
+    cumulative_homeostatic_terminations = 0
+    cumulative_truncations = 0
+    comparison_window_episode_ends = 0
+    comparison_window_transitions = 0
+    next_comparison_metrics_step = cfg.comparison_metrics_interval
     next_training_metrics_step = 0
+    next_rollout_metrics_step = cfg.rollout_metrics_interval
+    next_per_joint_metrics_step = cfg.per_joint_metrics_interval
+    next_deterministic_probe_step = cfg.deterministic_probe_interval
     obs, info = env.reset()
     prev_action = torch.zeros(cfg.num_workers, cfg.action_space_dim, device=cfg.device)
     is_first = torch.ones(cfg.num_workers, device=cfg.device)
@@ -144,12 +263,25 @@ def train_dreamer():
         cfg.replay_ratio / (batch_steps)
     )  # Removed frame skip from the denominator for now
     replay_ratio_started = False
+    episode_telemetry = EpisodeTelemetry(cfg.num_workers)
+    rollout_telemetry = RolloutTelemetryWindow(cfg.action_space_dim)
+    per_joint_telemetry = RolloutTelemetryWindow(cfg.action_space_dim)
 
     with mlflow.start_run(
         run_name="Dreamer V3 Training - "
         + dt.datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d_%H-%M-%S")
     ):
         mlflow.log_params(asdict(cfg))
+        mlflow.log_metrics(
+            {
+                "comparison/env_transition_step": 0.0,
+                "comparison/cumulative_episode_ends": 0.0,
+                "comparison/cumulative_homeostatic_terminations": 0.0,
+                "comparison/cumulative_truncations": 0.0,
+                "comparison/episode_end_rate_per_million": 0.0,
+            },
+            step=0,
+        )
 
         while global_step < cfg.total_env_steps:
             # ===== PHASE 1: Real World Interaction =====
@@ -185,6 +317,8 @@ def train_dreamer():
 
                 # Get action from actor
                 action, log_prob, dist = actor(latent, deterministic=False)
+                actor_loc = dist.base_dist.loc.detach().cpu().numpy()
+                actor_std = dist.base_dist.scale.detach().cpu().numpy()
                 action = action.detach().cpu().numpy()
 
                 # Check for NaN
@@ -233,9 +367,29 @@ def train_dreamer():
             env_action = np.clip(action, -1.0, 1.0)
             next_obs, rewards, terminations, truncations, infos = env.step(env_action)
             episode_end = terminations | truncations
-            # # TODO: Remove this
-            # mean_action_distance_from_center = float(np.mean(np.abs(action - 0.5)))
-            # action_std = float(np.std(action))
+            valid_transitions = ~current_is_last
+            newly_flipped_workers = episode_telemetry.add_transition(
+                valid=valid_transitions,
+                rewards=rewards,
+                infos=infos,
+                native_actions=action,
+                executed_actions=env_action,
+                actor_loc=actor_loc,
+                actor_std=actor_std,
+            )
+            if valid_transitions.any():
+                is_flipped = np.asarray(infos["is_flipped"], dtype=bool)
+            else:
+                is_flipped = np.zeros(cfg.num_workers, dtype=bool)
+            for telemetry_window in (rollout_telemetry, per_joint_telemetry):
+                telemetry_window.add_transition(
+                    valid=valid_transitions,
+                    raw_actions=action,
+                    executed_actions=env_action,
+                    actor_loc=actor_loc,
+                    actor_std=actor_std,
+                    is_flipped=is_flipped,
+                )
 
             obs = next_obs
             next_is_first = current_is_last
@@ -261,6 +415,110 @@ def train_dreamer():
             recurrent_state = recurrent_state * (1.0 - is_first.unsqueeze(-1))
             previous_stochastic = previous_stochastic * (1.0 - is_first.view(-1, 1, 1))
             global_step += cfg.num_workers
+            valid_transition_count = int(valid_transitions.sum())
+            env_transition_step += valid_transition_count
+            comparison_window_transitions += valid_transition_count
+
+            episode_finished_mask = np.asarray(
+                infos.get("_episode", np.zeros(cfg.num_workers, dtype=bool)),
+                dtype=bool,
+            )
+            completed_this_step = int(episode_finished_mask.sum())
+            cumulative_episode_ends += completed_this_step
+            comparison_window_episode_ends += completed_this_step
+            cumulative_homeostatic_terminations += int(
+                (episode_finished_mask & np.asarray(terminations, dtype=bool)).sum()
+            )
+            cumulative_truncations += int(
+                (episode_finished_mask & np.asarray(truncations, dtype=bool)).sum()
+            )
+            comparison_heartbeat_due = (
+                env_transition_step >= next_comparison_metrics_step
+            )
+            if completed_this_step or comparison_heartbeat_due:
+                comparison_metrics = {
+                    "comparison/env_transition_step": float(env_transition_step),
+                    "comparison/cumulative_episode_ends": float(
+                        cumulative_episode_ends
+                    ),
+                    "comparison/cumulative_homeostatic_terminations": float(
+                        cumulative_homeostatic_terminations
+                    ),
+                    "comparison/cumulative_truncations": float(
+                        cumulative_truncations
+                    ),
+                }
+                if comparison_heartbeat_due:
+                    comparison_metrics[
+                        "comparison/episode_end_rate_per_million"
+                    ] = (
+                        1_000_000.0
+                        * comparison_window_episode_ends
+                        / comparison_window_transitions
+                        if comparison_window_transitions
+                        else 0.0
+                    )
+                    comparison_window_episode_ends = 0
+                    comparison_window_transitions = 0
+                    while env_transition_step >= next_comparison_metrics_step:
+                        next_comparison_metrics_step += (
+                            cfg.comparison_metrics_interval
+                        )
+                mlflow.log_metrics(comparison_metrics, step=env_transition_step)
+
+            if newly_flipped_workers.size:
+                flip_rows = newly_flipped_workers
+                mlflow.log_metrics(
+                    {
+                        "flip_event/new_first_flip_count": float(flip_rows.size),
+                        "flip_event/episode_age_mean": float(
+                            episode_telemetry.episode_age[flip_rows].mean()
+                        ),
+                        "flip_event/posture_mean": float(
+                            np.asarray(infos["posture"])[flip_rows].mean()
+                        ),
+                        "flip_event/actor_std_mean": float(
+                            actor_std[flip_rows].mean()
+                        ),
+                        "flip_event/raw_action_clip_coordinate_fraction": float(
+                            (np.abs(action[flip_rows]) > 1.0).mean()
+                        ),
+                    },
+                    step=env_transition_step,
+                )
+
+            if env_transition_step >= next_rollout_metrics_step:
+                rollout_metrics = rollout_telemetry.summary()
+                rollout_metrics.update(episode_telemetry.active_survival_metrics())
+                rollout_metrics.update(
+                    {
+                        "rollout/env_transition_step": float(env_transition_step),
+                        "rollout/dreamer_global_step": float(global_step),
+                    }
+                )
+                mlflow.log_metrics(rollout_metrics, step=env_transition_step)
+                while env_transition_step >= next_rollout_metrics_step:
+                    next_rollout_metrics_step += cfg.rollout_metrics_interval
+
+            if env_transition_step >= next_per_joint_metrics_step:
+                mlflow.log_metrics(
+                    per_joint_telemetry.per_joint_summary(),
+                    step=env_transition_step,
+                )
+                while env_transition_step >= next_per_joint_metrics_step:
+                    next_per_joint_metrics_step += cfg.per_joint_metrics_interval
+
+            if env_transition_step >= next_deterministic_probe_step:
+                logger.info(
+                    "Running deterministic stability probe at transition step %d",
+                    env_transition_step,
+                )
+                mlflow.log_metrics(
+                    run_deterministic_stability_probe(world_model, actor, cfg),
+                    step=env_transition_step,
+                )
+                while env_transition_step >= next_deterministic_probe_step:
+                    next_deterministic_probe_step += cfg.deterministic_probe_interval
 
             # avg_episode_length = sum(list_iterations_episode_length) / len(list_iterations_episode_length) if list_iterations_episode_length else 0
             # avg_wm_loss = 0.0
@@ -281,13 +539,13 @@ def train_dreamer():
             # replay_terminal_count = 0.0
             # replay_terminal_items = 0
             if len(replay_buffer) >= cfg.min_buffer_size_before_training:
-                if not replay_ratio_started:
-                    # Do not retrospectively schedule updates for the replay
-                    # collection phase before training became eligible.
-                    should_train.start(global_step)
-                    replay_ratio_started = True
-                else:
-                    train_batches_due = should_train(global_step)
+                # if not replay_ratio_started:
+                #     # Do not retrospectively schedule updates for the replay
+                #     # collection phase before training became eligible.
+                #     should_train.start(global_step)
+                #     replay_ratio_started = True
+                # else:
+                train_batches_due = should_train(global_step)
 
             # ===== PHASE 2: World Model Training =====
             if (
@@ -530,7 +788,22 @@ def train_dreamer():
                         "episode/final_thirst": infos["thirst"][i],
                         "average_episode_length": avg_episode_length,
                         "global_step": global_step,
+                        "episode/env_transition_step": env_transition_step,
+                        "episode/start_global_step_estimate": max(
+                            0,
+                            global_step
+                            - int(infos["episode"]["l"][i]) * cfg.num_workers,
+                        ),
                     }
+                    episode_metrics.update(
+                        episode_telemetry.finish_episode(
+                            i,
+                            episode_return=float(infos["episode"]["r"][i]),
+                            episode_length=int(infos["episode"]["l"][i]),
+                            food_consumed=float(infos["food_consumed"][i]),
+                            water_consumed=float(infos["water_consumed"][i]),
+                        )
+                    )
                     # Episodes can finish while replay is still warming up.
                     # In that phase actor_loss_value and critic_loss_value are
                     # intentionally None because no training update has run;
@@ -597,6 +870,29 @@ def train_dreamer():
                     },
                     model_path
                 )
+
+        if episodes_finished != cumulative_episode_ends:
+            raise RuntimeError(
+                "Dreamer episode counter mismatch: "
+                f"episode logs={episodes_finished}, comparison={cumulative_episode_ends}"
+            )
+        final_comparison_metrics = {
+            "comparison/env_transition_step": float(env_transition_step),
+            "comparison/cumulative_episode_ends": float(cumulative_episode_ends),
+            "comparison/cumulative_homeostatic_terminations": float(
+                cumulative_homeostatic_terminations
+            ),
+            "comparison/cumulative_truncations": float(cumulative_truncations),
+        }
+        if comparison_window_transitions:
+            final_comparison_metrics[
+                "comparison/episode_end_rate_per_million"
+            ] = (
+                1_000_000.0
+                * comparison_window_episode_ends
+                / comparison_window_transitions
+            )
+        mlflow.log_metrics(final_comparison_metrics, step=env_transition_step)
 
     # Save models
     torch.save(
