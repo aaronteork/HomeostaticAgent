@@ -340,11 +340,11 @@ def evaluate_agent(args):
         config = DreamerConfig(is_training=False, image_size=(512, 512))
         world_model = WorldModel(config).to(config.device)
         dreamer_actor = ActorNetwork(config).to(config.device)
-        # checkpoint = torch.load(args.model_path, map_location=config.device)
-        # checkpoint["world_model"] = {key.replace("_orig_mod.", ""): value for key, value in checkpoint["world_model"].items()}
-        # checkpoint["actor"] = {key.replace("_orig_mod.", ""): value for key, value in checkpoint["actor"].items()}
-        # world_model.load_state_dict(checkpoint["world_model"])
-        # dreamer_actor.load_state_dict(checkpoint["actor"])
+        checkpoint = torch.load(args.model_path, map_location=config.device)
+        checkpoint["world_model"] = {key.replace("_orig_mod.", ""): value for key, value in checkpoint["world_model"].items()}
+        checkpoint["actor"] = {key.replace("_orig_mod.", ""): value for key, value in checkpoint["actor"].items()}
+        world_model.load_state_dict(checkpoint["world_model"])
+        dreamer_actor.load_state_dict(checkpoint["actor"])
         world_model.eval()
         dreamer_actor.eval()
         model = get_dreamer_agent(
