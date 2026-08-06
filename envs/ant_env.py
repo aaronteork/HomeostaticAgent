@@ -13,6 +13,7 @@ from gymnasium.utils import EzPickle
 from configs.config_env import EnvConfig
 
 DEFAULT_CAMERA_CONFIG = {}
+RESOURCE_MARKER_RADIUS = 0.5
 
 
 def qtoeuler(q):
@@ -94,6 +95,11 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
         self.ant_body_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_BODY, "torso"
         )
+        self.pov_camera_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_CAMERA, "pov"
+        )
+        if self.pov_camera_id == -1:
+            raise ValueError("ant_env.xml must define a camera named 'pov'.")
 
         # ------------ Observation and Action space ------------------
         # Create action space and observation space
@@ -402,11 +408,11 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
         for obj in self.object:
             type_gen, x, y = obj
             if type_gen == "food":
-                viewer.add_marker(pos=(x, y, 0.5), size=(0.5, 0.5, 0.5), rgba=(0, 1, 0, 1), label=" ", type=mujoco.mjtGeom.mjGEOM_SPHERE)
+                viewer.add_marker(pos=(x, y, 0.5), size=(RESOURCE_MARKER_RADIUS,) * 3, rgba=(0, 1, 0, 1), label=" ", type=mujoco.mjtGeom.mjGEOM_SPHERE)
             elif type_gen == "water":
-                viewer.add_marker(pos=(x, y, 0.5), size=(0.5, 0.5, 0.5), rgba=(0, 0, 1, 1), label=" ", type=mujoco.mjtGeom.mjGEOM_SPHERE)
+                viewer.add_marker(pos=(x, y, 0.5), size=(RESOURCE_MARKER_RADIUS,) * 3, rgba=(0, 0, 1, 1), label=" ", type=mujoco.mjtGeom.mjGEOM_SPHERE)
             elif type_gen == "heat":
-                viewer.add_marker(pos=(x, y, 0.5), size=(0.5, 0.5, 0.5), rgba=(1, 0, 0, 1), label=" ", type=mujoco.mjtGeom.mjGEOM_SPHERE)
+                viewer.add_marker(pos=(x, y, 0.5), size=(RESOURCE_MARKER_RADIUS,) * 3, rgba=(1, 0, 0, 1), label=" ", type=mujoco.mjtGeom.mjGEOM_SPHERE)
 
     def mux_render(self, camera_name):
         cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, camera_name)
@@ -546,10 +552,9 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
         current_drive = self._calculate_drive()
 
         homeo_reward = self.cfg.reward_scale * (self.prev_drive - current_drive)
-        physical_penalty = (
-            (-1.0 * self.cfg.movement_penalty_weight * action_magnitude**2) +
-            (-1.0 * self.cfg.posture_penalty_weight * self.posture**2)
-        )
+        movement_penalty = -self.cfg.movement_penalty_weight * action_magnitude**2
+        posture_penalty = -self.cfg.posture_penalty_weight * self.posture**2
+        physical_penalty = movement_penalty + posture_penalty
 
         reward = homeo_reward + physical_penalty
         self.prev_drive = current_drive
@@ -567,9 +572,14 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
             "food_consumed": np.array(self.food_consumed),
             "water_consumed": np.array(self.water_consumed),
             "up_vector_z": np.array(up_vector_z),
+            "is_flipped": np.array(is_flipped),
             "z_pos": np.array(z_pos),
             "termination_reason": np.array(term_reason),
             "posture": np.array(self.posture),
+            "action_magnitude": np.array(action_magnitude),
+            "reward_homeostatic": np.array(homeo_reward),
+            "reward_movement_penalty": np.array(movement_penalty),
+            "reward_posture_penalty": np.array(posture_penalty),
         }
 
         # info = {
@@ -639,26 +649,42 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
     def truncated(self):
         return self.current_step >= self.cfg.max_steps
 
-    def _is_in_front(self, target_pos, fov_threshold=0.5):
+    def _is_in_front(self, target_pos, target_radius=RESOURCE_MARKER_RADIUS):
+        """Return whether any part of a resource lies in the POV horizontal FOV.
+
+        MuJoCo cameras look along their local ``-Z`` axis.  Deriving the
+        direction from ``cam_xmat`` keeps the interaction rule aligned with the
+        XML camera even if its mounting orientation changes.  This deliberately
+        checks the horizontal cone only: resource interaction is defined on the
+        arena plane, while the camera's vertical framing changes as the ant
+        pitches and rolls.  The rendered resources are spheres, so their
+        angular radius is included; otherwise a visibly protruding resource at
+        the image edge could not be consumed merely because its centre was just
+        outside the cone.
         """
-        Checks if target_pos is within the agent's forward-facing cone.
-        0.5 corresponds to a +/- 60 degree FOV (total 120 degrees).
-        """
-        # 1. Get Ant's current position and rotation matrix
+        camera_axes = self.data.cam_xmat[self.pov_camera_id].reshape(3, 3)
+        camera_forward_xy = -camera_axes[:, 2][:2]
+        forward_norm = np.linalg.norm(camera_forward_xy)
+        if forward_norm < 1e-6:
+            return False
+        camera_forward_xy /= forward_norm
+
         ant_pos = self.data.xpos[self.ant_body_id][:2]
-        # In MuJoCo, the first column of the xmat (rotation matrix) is the local X-axis (Forward)
-        forward_vec = self.data.xmat[self.ant_body_id].reshape(3, 3)[:, 0]
+        target_direction = np.asarray(target_pos, dtype=np.float64)[:2] - ant_pos
+        target_distance = np.linalg.norm(target_direction)
+        if target_distance < 1e-6:
+            return True
+        target_direction /= target_distance
 
-        # 2. Vector from Ant to Resource (ignore Z for a flat arena check)
-        target_vec = target_pos - ant_pos
-
-        # # 3. Normalize the target vector
-        # dist = np.linalg.norm(target_vec)
-        # if dist < 1e-6:
-        #     return True  # If touching, count as in front
-        # target_vec /= dist
-
-        # 4. Dot product check
-        dot_product = np.dot(forward_vec[:2], target_vec[:2])
-
-        return dot_product > fov_threshold
+        # ``fovy`` is vertical.  Convert it to a horizontal FOV for the render
+        # aspect ratio so this condition follows the camera rather than a
+        # duplicated hard-coded angle.  The current 64x64 render makes both
+        # angles 120 degrees.
+        vertical_fov = np.deg2rad(self.model.cam_fovy[self.pov_camera_id])
+        width, height = self.cfg.image_size
+        horizontal_fov = 2.0 * np.arctan(np.tan(vertical_fov / 2.0) * width / height)
+        angular_radius = np.arcsin(min(1.0, max(0.0, target_radius) / target_distance))
+        return bool(
+            np.dot(camera_forward_xy, target_direction)
+            >= np.cos(horizontal_fov / 2.0 + angular_radius)
+        )
