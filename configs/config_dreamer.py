@@ -15,7 +15,7 @@ class DreamerConfig(EnvConfig):
     mlp_n_layers: int = 3
     batch_size: int = 16
     batch_length: int = 64
-    total_env_steps: int = 3_000_000
+    total_env_steps: int = 5_000_000
     replay_ratio: int = 32
     # Keep scalar diagnostics useful without making SQLite telemetry a material
     # part of the training loop.  The deterministic probe is deliberately
@@ -39,7 +39,7 @@ class DreamerConfig(EnvConfig):
 
     # Replay buffer parameters
     # replay_scaling: int = 64
-    replay_capacity: int = 500_000  # paper is originally 5e6
+    replay_capacity: int = 1_000_000  # paper is originally 5e6
     replay_context: int = 1
     min_buffer_size_before_training: int | None = None
 
