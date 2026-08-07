@@ -52,7 +52,7 @@ def train_ppo():
     torch.set_float32_matmul_precision('high') 
     agent = HomeostaticPPO(cfg)
     agent.to(cfg.device)
-    agent = torch.compile(agent, dynamic=True)
+    # agent = torch.compile(agent, dynamic=True)
     optimizer = Adam(agent.parameters(), lr=cfg.lr_start, eps=cfg.adam_eps)
     scheduler = LinearLR(optimizer, start_factor=1.0, end_factor=0.1, total_iters=cfg.total_updates)
     logger.info("Created PPO agent and optimizer")
