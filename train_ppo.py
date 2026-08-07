@@ -71,7 +71,7 @@ def train_ppo():
     comparison_window_episode_ends = 0
     comparison_window_transitions = 0
     next_comparison_metrics_step = cfg.comparison_metrics_interval
-    obs, info = env.reset(cfg.seed)
+    obs, info = env.reset(seed=cfg.seed)
     # SyncVectorEnv uses next-step autoreset in this project. After an episode
     # boundary, the next env.step() ignores that worker's action and only
     # returns its reset observation. Keep the row for temporal alignment and

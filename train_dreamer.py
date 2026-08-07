@@ -253,7 +253,7 @@ def train_dreamer():
     next_rollout_metrics_step = cfg.rollout_metrics_interval
     next_per_joint_metrics_step = cfg.per_joint_metrics_interval
     next_deterministic_probe_step = cfg.deterministic_probe_interval
-    obs, info = env.reset(cfg.seed)
+    obs, info = env.reset(seed=cfg.seed)
     prev_action = torch.zeros(cfg.num_workers, cfg.action_space_dim, device=cfg.device)
     is_first = torch.ones(cfg.num_workers, device=cfg.device)
     replay_reward = np.zeros(cfg.num_workers, dtype=np.float32)
