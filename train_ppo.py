@@ -10,6 +10,7 @@ from torch.optim.lr_scheduler import LinearLR
 from tqdm.auto import tqdm
 
 from configs.config_ppo import PPOConfig
+from utils.utils import set_seed
 from utils.utils_env import create_env
 from utils.utils_logger import create_logger
 from utils.utils_ppo import (
@@ -35,6 +36,9 @@ def train_ppo():
     # Get config
     cfg = PPOConfig()
     logger.info(f"Config: {cfg}")
+
+    # Set seed
+    set_seed(cfg.seed)
 
     # Create environment
     env = create_env(cfg, multiple_env=True)
@@ -67,7 +71,7 @@ def train_ppo():
     comparison_window_episode_ends = 0
     comparison_window_transitions = 0
     next_comparison_metrics_step = cfg.comparison_metrics_interval
-    obs, info = env.reset()
+    obs, info = env.reset(cfg.seed)
     # SyncVectorEnv uses next-step autoreset in this project. After an episode
     # boundary, the next env.step() ignores that worker's action and only
     # returns its reset observation. Keep the row for temporal alignment and

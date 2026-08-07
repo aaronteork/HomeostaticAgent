@@ -26,7 +26,7 @@ class SequenceReplayBuffer:
         self.replay_context = config.replay_context
         self.sequence_length = self.batch_length + self.replay_context
         self.batch_size = config.batch_size
-        self._rng = np.random.default_rng()
+        self._rng = np.random.default_rng(self.config.seed)
         self._total_rows_committed = 0
         self._online_queue = deque()
 

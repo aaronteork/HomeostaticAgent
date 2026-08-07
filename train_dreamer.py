@@ -8,6 +8,7 @@ import torch
 from torch.optim.lr_scheduler import LinearLR
 
 from configs.config_dreamer import DreamerConfig
+from utils.utils import set_seed
 from utils.agc import agc
 from utils.episode_telemetry import EpisodeTelemetry, RolloutTelemetryWindow
 from utils.laprop import LaProp
@@ -151,6 +152,9 @@ def train_dreamer():
     cfg = DreamerConfig()
     logger.info(f"Config: {cfg}")
 
+    # Set seed
+    set_seed(cfg.seed)
+
     # Check that the config does not have frame stack key
     assert not hasattr(cfg, "frame_stack_key"), (
         "DreamerConfig should not have frame_stack_key attribute"
@@ -249,7 +253,7 @@ def train_dreamer():
     next_rollout_metrics_step = cfg.rollout_metrics_interval
     next_per_joint_metrics_step = cfg.per_joint_metrics_interval
     next_deterministic_probe_step = cfg.deterministic_probe_interval
-    obs, info = env.reset()
+    obs, info = env.reset(cfg.seed)
     prev_action = torch.zeros(cfg.num_workers, cfg.action_space_dim, device=cfg.device)
     is_first = torch.ones(cfg.num_workers, device=cfg.device)
     replay_reward = np.zeros(cfg.num_workers, dtype=np.float32)
