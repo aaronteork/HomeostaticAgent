@@ -22,6 +22,7 @@ class PPOConfig(EnvConfig):
     vf_coef: float = 0.5
     target_kl: float = 0.02
     image_latent_dim: int = 200
+    checkpoint_steps: int = 5_000_000
 
     def __post_init__(self):
         if self.comparison_metrics_interval <= 0:

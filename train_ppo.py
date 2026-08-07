@@ -53,6 +53,10 @@ def train_ppo():
     scheduler = LinearLR(optimizer, start_factor=1.0, end_factor=0.1, total_iters=cfg.total_updates)
     logger.info("Created PPO agent and optimizer")
 
+    # Model path
+    model_path = f"./models/ppo_agent_{dt.datetime.now(ZoneInfo("Asia/Singapore")).strftime('%Y-%m-%d_%H-%M-%S')}.pt"
+    checkpoint_saved = False
+
     # Test out agent and environment
     logger.info("Running agent and environment")
     global_step = 0
@@ -400,8 +404,12 @@ def train_ppo():
                 / comparison_window_transitions
             )
         mlflow.log_metrics(final_comparison_metrics, step=global_step)
+        
+        if global_step >= cfg.checkpoint_steps and not checkpoint_saved:
+            torch.save(agent.state_dict(), "checkpoint_maxsteps_" + model_path)
+            logger.info(f"Model saved to {model_path} at global step {global_step}")
+            checkpoint_saved = True
 
-    model_path = f"./models/ppo_agent_{dt.datetime.now(ZoneInfo("Asia/Singapore")).strftime('%Y-%m-%d_%H-%M-%S')}.pt"
     torch.save(agent.state_dict(), model_path)
     print(f"model saved to {model_path}")
 
