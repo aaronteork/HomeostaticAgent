@@ -145,7 +145,7 @@ def train_dreamer():
     logger.info("Starting Dreamer V3 training...")
 
     # Create mlflow
-    mlflow.set_tracking_uri("sqlite:///runs.db?timeout=50000")
+    mlflow.set_tracking_uri("file:./mlruns")
     mlflow.set_experiment("HomoeostaticAgent")
 
     # Get config
