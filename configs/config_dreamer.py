@@ -64,15 +64,17 @@ class DreamerConfig(EnvConfig):
     imagine_batch_size: int = 16
     # world_model_grad_steps_per_update: int = 1
     # world_model_lr: float = 1e-4
-    ent_coef: float = 3e-4
+    ent_coef: float = 0.005  # 3e-4
     return_norm_rate: float = 0.01
     return_norm_limit: float = 1.0
     return_norm_percentile_low: float = 5.0
     return_norm_percentile_high: float = 95.0
 
     # Actor and critic
-    actor_min_std: float = 0.1
-    actor_max_std: float = 1.0
+    # The Beta actor is defined on [0, 1] then affinely mapped to the Ant's
+    # native [-1, 1] action coordinates. This lower bound keeps its mode
+    # defined and prevents boundary-singular concentrations.
+    actor_min_concentration: float = 1.0
     actor_outscale: float = 0.01
     # actor_lr: float = 3e-5
     # actor_critic_grad_steps_per_update: int = 1
@@ -107,10 +109,10 @@ class DreamerConfig(EnvConfig):
             raise ValueError("deterministic_probe_interval must be positive")
         if self.deterministic_probe_steps <= 0:
             raise ValueError("deterministic_probe_steps must be positive")
-        if not 0.0 < self.actor_min_std <= self.actor_max_std:
+        if self.actor_min_concentration < 1.0:
             raise ValueError(
-                "actor standard deviations must satisfy "
-                "0 < actor_min_std <= actor_max_std"
+                "actor_min_concentration must be at least 1.0 so the Beta "
+                "policy has a finite interior mode"
             )
         if self.actor_outscale <= 0.0:
             raise ValueError("actor_outscale must be positive")

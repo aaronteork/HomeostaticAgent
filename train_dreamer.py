@@ -161,7 +161,7 @@ def train_dreamer():
     )
 
     # Create environment
-    env = create_env(cfg, multiple_env=True, rescale_action=False)
+    env = create_env(cfg, multiple_env=True)
     # frame_skip = env.envs[0].unwrapped.frame_skip
     logger.info(f"Created parallel environment with {cfg.num_workers} workers")
 
@@ -321,8 +321,8 @@ def train_dreamer():
 
                 # Get action from actor
                 action, log_prob, dist = actor(latent, deterministic=False)
-                actor_loc = dist.base_dist.loc.detach().cpu().numpy()
-                actor_std = dist.base_dist.scale.detach().cpu().numpy()
+                actor_loc = dist.mean.detach().cpu().numpy()
+                actor_std = dist.stddev.detach().cpu().numpy()
                 action = action.detach().cpu().numpy()
 
                 # Check for NaN

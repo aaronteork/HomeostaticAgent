@@ -432,9 +432,8 @@ def imagination_rollout(
     for step in range(horizon):
         action, _, dist = actor(latent.detach(), deterministic=False)
         imagined_actions.append(action)
-        # The upstream bounded-normal actor uses a joint-event Independent
-        # Normal whose log-probability and entropy are already reduced over
-        # action joints. The RSSM bounds the raw sample internally.
+        # The affine-Beta actor returns native [-1, 1] actions and joint
+        # log-probabilities/entropies already reduced over action joints.
         imagined_log_probs.append(dist.log_prob(action.detach()))
         imagined_entropies.append(dist.entropy())
 
