@@ -255,6 +255,10 @@ def task_shift(model, config, out_pov, out_env, model_name):
             out_env.write(cv2.cvtColor(info["environment"], cv2.COLOR_RGB2BGR))
             if episode_steps % 100 == 0:
                 print(f"Step: {episode_steps}", end="\r", flush=True)
+            
+            # End if both resources are consumed
+            if info["food_consumed"] >= 1 and info["water_consumed"] >= 1:
+                break
     env.close()
 
 
@@ -306,6 +310,10 @@ def task_ymaze(model, config, out_pov, out_env, model_name):
             out_pov.write(cv2.cvtColor(info["vision"], cv2.COLOR_RGB2BGR))
             out_env.write(cv2.cvtColor(info["environment"], cv2.COLOR_RGB2BGR))
 
+            # End episode if both resources have been consumed
+            if info["food_consumed"] >= 1 and info["water_consumed"] >= 1:
+                break
+
         # If episode is finished, log info
         eval_results["episode"].append(episode)
         eval_results["final_hunger"].append(info["hunger"])
@@ -330,11 +338,11 @@ def evaluate_agent(args):
     if args.model == "ppo":
         config = PPOConfig(is_training=False, image_size=(512, 512))
         model = HomeostaticPPO(config).to(config.device)
-        # checkpoint = torch.load(args.model_path, map_location=config.device)
-        # cleaned_state_dict = {
-        #     key.replace("_orig_mod.", ""): value for key, value in checkpoint.items()
-        # }
-        # model.load_state_dict(cleaned_state_dict)
+        checkpoint = torch.load(args.model_path, map_location=config.device)
+        cleaned_state_dict = {
+            key.replace("_orig_mod.", ""): value for key, value in checkpoint.items()
+        }
+        model.load_state_dict(cleaned_state_dict)
         model.eval()
     elif args.model == "dreamer":
         config = DreamerConfig(is_training=False, image_size=(512, 512))

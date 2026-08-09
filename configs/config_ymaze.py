@@ -38,4 +38,4 @@ class YMazeConfig(EnvConfig):
     # Test settings
     randomize_arms: bool = True  # Whether to randomize which arm has food vs water each episode
     is_training: bool = False    # Override default; test environment renders debug images
-    episodes_to_run: int = 5             # Number of episodes to run for evaluation
+    episodes_to_run: int = 10             # Number of episodes to run for evaluation
