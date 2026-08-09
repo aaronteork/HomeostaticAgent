@@ -33,7 +33,7 @@
       
       <!-- POV Camera and Marker: A small blue sphere on the torso -->
       <!-- <geom name="pov_cam_marker" pos="0.25 0 0.1" size="0.05" type="sphere" rgba="0 0 0 1" conaffinity="0" contype="0"/> -->
-      <camera name="pov" euler="90 0 0" fovy="120" pos="0.0 0 0.6" />
+      <camera name="pov" euler="90 0 0" fovy="90" pos="0.0 0 0.6" />
       <site name="camera_pos" rgba="1 0 0 1" pos="0 0 0.6" size="0.05"/>
 
       <geom name="torso_geom" pos="0 0 0" size="0.25" type="sphere"/>

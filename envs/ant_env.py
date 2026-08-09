@@ -182,6 +182,7 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
         # self.init_qpos includes the x and y coordinates in the first 2 entries, different from observation space which does not
         if self.cfg.shift:
             qpos = self.init_qpos
+            qpos[1] = -3.0
             qvel = self.init_qvel
         else:
             qpos = self.init_qpos + self.np_random.uniform(
@@ -486,15 +487,15 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
                 if type_gen == "food" and self._is_in_front(np.array([x, y])):
                     self.hunger += self.cfg.replenish_rate
                     self.food_consumed += 1
+                    self.object.remove(obj)
                     if not self.cfg.shift:
                         self.object.append(self._generate_new_object(type_gen))
-                        self.object.remove(obj)
                 elif type_gen == "water" and self._is_in_front(np.array([x, y])):
                     self.thirst += self.cfg.replenish_rate
                     self.water_consumed += 1
+                    self.object.remove(obj)
                     if not self.cfg.shift:
                         self.object.append(self._generate_new_object(type_gen))
-                        self.object.remove(obj)
                 elif type_gen == "heat":
                     # heat doesnt get consumed
                     contact_heat += 1
