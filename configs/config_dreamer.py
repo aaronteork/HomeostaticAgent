@@ -45,6 +45,9 @@ class DreamerConfig(EnvConfig):
 
     # World model loss
     # world_model_grad_norm_clip: float = 1000.0
+    # Reconstruction heads use per-element MSE before these weights are applied.
+    # Equal values therefore give vision, proprioception, and internal state equal
+    # head-level pressure rather than letting image pixel count dominate.
     vision_reconstruction_weight: float = 1.0
     proprioception_reconstruction_weight: float = 1.0
     internal_state_reconstruction_weight: float = 1.0

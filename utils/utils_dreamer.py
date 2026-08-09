@@ -48,6 +48,28 @@ def symlog(x: Tensor) -> Tensor:
     return torch.sign(x) * torch.log(1 + torch.abs(x))
 
 
+def reconstruction_head_losses(
+    reconstructed_obs: dict[str, Tensor], obs: dict[str, Tensor]
+) -> dict[str, Tensor]:
+    """Return equally-normalized reconstruction losses for each observation head.
+
+    Each head averages its own feature dimensions before averaging batch/time.
+    Thus an unweighted head reports per-element MSE regardless of whether it is
+    an RGB-D image or a small vector. Vector targets remain in symlog space to
+    match the vector decoder outputs.
+    """
+    losses: dict[str, Tensor] = {}
+    for key, reconstruction in reconstructed_obs.items():
+        target = obs[key].detach()
+        if key == "vision":
+            errors = F.mse_loss(reconstruction, target, reduction="none")
+            losses[key] = errors.mean(dim=(-3, -2, -1)).mean()
+        else:
+            errors = F.mse_loss(reconstruction, symlog(target), reduction="none")
+            losses[key] = errors.mean(dim=-1).mean()
+    return losses
+
+
 def symexp(x: Tensor) -> Tensor:
     return torch.sign(x) * (torch.exp(torch.abs(x)) - 1)
 
@@ -237,16 +259,12 @@ def compute_world_model_loss(
     )
 
     # ===== Reconstruction Loss (decoder recovers Ant observation dict) =====
-    # Use normal MSE for images
-    # Use symlog + MSE for proprioception and internal state to handle large dynamic range since they are vector inputs
-    # This is a simpler way of doing compared to SheepRL's implementation which has a MSEDistribution
+    # Per-head feature averaging prevents the 16,384-element RGB-D image from
+    # implicitly outweighing the 27-dimensional proprioception and 2-dimensional
+    # internal-state heads. The explicit config weights now genuinely express
+    # relative head-level importance.
     reconstructed_obs = decoder(latent)
-    recon_losses = {
-        key: F.mse_loss(reconstructed_obs[key], obs[key].detach(), reduction="none").sum(dim=(-3, -2, -1)).mean()
-        if key == "vision"
-        else F.mse_loss(reconstructed_obs[key], symlog(obs[key].detach()), reduction="none").sum(dim=-1).mean()
-        for key in reconstructed_obs.keys()
-    }
+    recon_losses = reconstruction_head_losses(reconstructed_obs, obs)
     recon_loss = (
         config.vision_reconstruction_weight * recon_losses["vision"]
         + config.proprioception_reconstruction_weight * recon_losses["proprioception"]
