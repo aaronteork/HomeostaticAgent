@@ -264,7 +264,13 @@ def compute_world_model_loss(
     # internal-state heads. The explicit config weights now genuinely express
     # relative head-level importance.
     reconstructed_obs = decoder(latent)
-    recon_losses = reconstruction_head_losses(reconstructed_obs, obs)
+    # recon_losses = reconstruction_head_losses(reconstructed_obs, obs)
+    recon_losses = {
+        key: F.mse_loss(reconstructed_obs[key], obs[key].detach(), reduction="none").sum(dim=(-3, -2, -1)).mean()
+        if key == "vision"
+        else F.mse_loss(reconstructed_obs[key], symlog(obs[key].detach()), reduction="none").sum(dim=-1).mean()
+        for key in reconstructed_obs.keys()
+    }
     recon_loss = (
         config.vision_reconstruction_weight * recon_losses["vision"]
         + config.proprioception_reconstruction_weight * recon_losses["proprioception"]
