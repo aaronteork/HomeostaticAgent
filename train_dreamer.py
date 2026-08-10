@@ -33,7 +33,7 @@ from utils.world_model import ActorNetwork, CriticNetwork, WorldModel
 def run_deterministic_stability_probe(world_model, actor, cfg):
     """Run a fixed-length deterministic probe without modifying training state."""
     probe_cfg = replace(cfg, is_training=False, max_steps=float("inf"))
-    probe_env = create_env(probe_cfg, multiple_env=True, rescale_action=False)
+    probe_env = create_env(probe_cfg, multiple_env=True)
     try:
         obs, _ = probe_env.reset(seed=cfg.seed)
         previous_action = torch.zeros(
