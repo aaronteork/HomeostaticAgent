@@ -15,6 +15,7 @@ class EnvConfig(BaseConfig):
     comparison_metrics_interval: int = 50_000
     arena_size: float = 6.0
     shift: bool = False
+    training_initial_bounds: float = 0.5
     day_night_cycle_len: int = 1
     object_spacing: float = 2.0
     object_interaction_dist: float = 1.0

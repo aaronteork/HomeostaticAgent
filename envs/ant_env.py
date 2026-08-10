@@ -148,9 +148,9 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
         # Reset initial states
         if self.cfg.is_training:
             # During training, we can randomize the initial homeostatic state
-            self.hunger = self.np_random.uniform(-(1 / 6), (1 / 6))
-            self.thirst = self.np_random.uniform(-(1 / 6), (1 / 6))
-            self.temperature = self.np_random.uniform(-(1 / 6), (1 / 6))
+            self.hunger = self.np_random.uniform(-(self.cfg.training_initial_bounds), (self.cfg.training_initial_bounds))
+            self.thirst = self.np_random.uniform(-(self.cfg.training_initial_bounds), (self.cfg.training_initial_bounds))
+            self.temperature = self.np_random.uniform(-(self.cfg.training_initial_bounds), (self.cfg.training_initial_bounds))
         else:
             # For shifting internal state task
             if self.cfg.shift:
