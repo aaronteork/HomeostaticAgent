@@ -423,12 +423,12 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
         old_cam_id = self.mujoco_renderer.camera_id
         self.mujoco_renderer.camera_id = cam_id
 
-        # Override clipping planes for the environment camera
-        old_znear = self.model.vis.map.znear
-        old_zfar = self.model.vis.map.zfar
-        if camera_name == "environment":
-            self.model.vis.map.znear = 0.01
-            self.model.vis.map.zfar = 2.0
+        # # Override clipping planes for the environment camera
+        # old_znear = self.model.vis.map.znear
+        # old_zfar = self.model.vis.map.zfar
+        # if camera_name == "environment":
+        #     self.model.vis.map.znear = 0.01
+        #     self.model.vis.map.zfar = 50.0
 
         # Adjust lighting based on day/night before rendering
         is_night = (self.current_step % self.cfg.day_night_cycle_len) >= (
@@ -443,8 +443,8 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
 
         img = self.mujoco_renderer.render(render_mode="rgbd_tuple")
 
-        self.model.vis.map.znear = old_znear
-        self.model.vis.map.zfar = old_zfar
+        # self.model.vis.map.znear = old_znear
+        # self.model.vis.map.zfar = old_zfar
         self.mujoco_renderer.camera_id = old_cam_id
         return img
 
