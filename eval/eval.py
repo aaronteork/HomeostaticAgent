@@ -92,7 +92,7 @@ def get_dreamer_agent(world_model, dreamer_actor, *, device, deterministic=True)
     """Build a stateful Dreamer policy for a single evaluation environment.
 
     The RSSM posterior must be carried between environment steps.  Call
-    ``agent.reset()`` immediately after every ``env.reset()`` so the next
+    ``agent.reset()`` immediately after every ``env.reset(seed=config.seed)()`` so the next
     observation is processed from Dreamer's fixed zero RSSM state.
     """
     recurrent_state = None
@@ -164,7 +164,7 @@ def task_forage(model, config, out_pov, out_env, model_name):
 
     # Create environment
     env = create_env(config, multiple_env=False)
-    obs, info = env.reset()
+    obs, info = env.reset(seed=config.seed)()
     if model_name == "dreamer":
         model.reset()
 
@@ -232,7 +232,7 @@ def task_shift(model, config, out_pov, out_env, model_name):
     env = create_env(config, multiple_env=False)
     
     for episode in tqdm(range(10), desc="Evaluating agent"):
-        obs, info = env.reset()
+        obs, info = env.reset(seed=config.seed)()
         if model_name == "dreamer":
             model.reset()
         # Setup statistics collection
@@ -291,7 +291,7 @@ def task_ymaze(model, config, out_pov, out_env, model_name):
     }
 
     for episode in tqdm(range(ymaze_cfg.episodes_to_run), desc="Evaluating agent"):
-        obs, info = env.reset()
+        obs, info = env.reset(seed=config.seed)()
         if model_name == "dreamer":
             model.reset()
         done = False
