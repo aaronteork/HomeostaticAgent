@@ -205,6 +205,10 @@ def task_forage(model, config, out_pov, out_env, model_name):
             print(f"Step: {episode_steps}", end="\r", flush=True)
     print("\n")
     print("Episode finished")
+    print(f"Food consumed: {info['food_consumed']}")
+    print(f"Water consumed: {info['water_consumed']}")
+    print(f"Final hunger: {info['hunger']}")
+    print(f"Final thirst: {info['thirst']}")
     env.close()
 
     # Save episode statistics
