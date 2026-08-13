@@ -5,7 +5,7 @@ from configs.config_env import EnvConfig
 @dataclass(frozen=True, kw_only=True)
 class DreamerConfig(EnvConfig):
     # Model parameters
-    hidden_dim: int = 256
+    hidden_dim: int = 512
     stochastic_units: int = 32
 
     rssm_unimix: float = 0.01
