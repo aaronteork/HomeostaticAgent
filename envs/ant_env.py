@@ -553,13 +553,14 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
         elif is_height_invalid:
             term_reason = 3  # height
 
+        # Homeostatic Reward (Paper: Reduction in Drive)
+        # Calculate drive then clip 
+        current_drive = self._calculate_drive()
+
         # Clipping state variables
         self.hunger = np.clip(self.hunger, -1.0, 1.0)
         self.thirst = np.clip(self.thirst, -1.0, 1.0)
         self.temperature = np.clip(self.temperature, -1.0, 1.0)
-
-        # Homeostatic Reward (Paper: Reduction in Drive)
-        current_drive = self._calculate_drive()
 
         homeo_reward = self.cfg.reward_scale * (self.prev_drive - current_drive)
         movement_penalty = -self.cfg.movement_penalty_weight * action_magnitude**2
