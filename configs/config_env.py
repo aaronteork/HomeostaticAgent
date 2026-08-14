@@ -8,6 +8,7 @@ class EnvConfig(BaseConfig):
     xml_path: str = "ant_env.xml"
     env_name: str = "HomeostaticAntEnv"
     max_steps: float = float("inf")
+    eval_max_steps: int = 60_000
     image_size: tuple[int, int] = (64, 64)
     num_workers: int = 16
     # A coarse survival heartbeat is sufficient for cross-trainer comparisons
