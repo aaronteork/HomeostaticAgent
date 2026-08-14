@@ -232,13 +232,13 @@ def task_shift(model, config, out_pov, out_env, model_name):
     env = create_env(config, multiple_env=False)
     
     for episode in tqdm(range(10), desc="Evaluating agent"):
-        obs, info = env.reset(seed=config.seed)
+        obs, info = env.reset(seed=config.seed + episode)
         if model_name == "dreamer":
             model.reset()
         # Setup statistics collection
         episode_steps = 0
         done = False
-        while not done and episode_steps < config.max_steps:
+        while not done and episode_steps < config.eval_max_steps:
             obs = prep_obs(obs)
             # Get action from agent
             if model_name == "ppo":
@@ -291,7 +291,7 @@ def task_ymaze(model, config, out_pov, out_env, model_name):
     }
 
     for episode in tqdm(range(ymaze_cfg.episodes_to_run), desc="Evaluating agent"):
-        obs, info = env.reset(seed=config.seed)
+        obs, info = env.reset(seed=config.seed + episode)
         if model_name == "dreamer":
             model.reset()
         done = False
