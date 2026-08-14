@@ -587,11 +587,11 @@ class YMazeTestEnv(AntEnv, EzPickle):
         for obj in self.object:
             type_gen, x, y = obj
             if type_gen == "food":
-                viewer.add_marker(pos=(x, y, 0.5), size=(0.5, 0.5, 0.5), rgba=(0, 1, 0, 1), label=" ", type=mujoco.mjtGeom.mjGEOM_SPHERE)
+                viewer.add_marker(pos=(x, y, 0.5), size=(0.5, 0.5, 0.5), rgba=(1, 0, 0, 1), label=" ", type=mujoco.mjtGeom.mjGEOM_SPHERE)
             elif type_gen == "water":
                 viewer.add_marker(pos=(x, y, 0.5), size=(0.5, 0.5, 0.5), rgba=(0, 0, 1, 1), label=" ", type=mujoco.mjtGeom.mjGEOM_SPHERE)
             elif type_gen == "heat":
-                viewer.add_marker(pos=(x, y, 0.5), size=(0.5, 0.5, 0.5), rgba=(1, 0, 0, 1), label=" ", type=mujoco.mjtGeom.mjGEOM_SPHERE)
+                viewer.add_marker(pos=(x, y, 0.5), size=(0.5, 0.5, 0.5), rgba=(0, 1, 0, 1), label=" ", type=mujoco.mjtGeom.mjGEOM_SPHERE)
 
     def render(self):
         self._add_markers(render_mode=self.render_mode)
