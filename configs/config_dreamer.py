@@ -18,13 +18,13 @@ class DreamerConfig(EnvConfig):
     total_env_steps: int = 5_000_000
     replay_ratio: int = 32
     # Keep scalar diagnostics useful without making SQLite telemetry a material
-    # part of the training loop.  The deterministic probe is deliberately
-    # sparse: it runs extra MuJoCo rollouts outside the training trajectory.
+    # part of the training loop. The deterministic evaluation is deliberately
+    # sparse because each worker runs one complete episode (up to
+    # ``eval_max_steps``) outside the training trajectory.
     train_metrics_interval: int = 25_000
     rollout_metrics_interval: int = 50_000
     per_joint_metrics_interval: int = 500_000
     deterministic_probe_interval: int = 1_000_000
-    deterministic_probe_steps: int = 500
     # total_updates: int = 1_000
     adam_eps: float = 1e-5
     laprop_eps: float = 1e-20
@@ -107,8 +107,6 @@ class DreamerConfig(EnvConfig):
             raise ValueError("per_joint_metrics_interval must be positive")
         if self.deterministic_probe_interval <= 0:
             raise ValueError("deterministic_probe_interval must be positive")
-        if self.deterministic_probe_steps <= 0:
-            raise ValueError("deterministic_probe_steps must be positive")
         if self.actor_min_concentration < 1.0:
             raise ValueError(
                 "actor_min_concentration must be at least 1.0 so the Beta "

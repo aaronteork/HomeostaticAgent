@@ -31,8 +31,18 @@ from utils.world_model import ActorNetwork, CriticNetwork, WorldModel
 
 
 def run_deterministic_stability_probe(world_model, actor, cfg):
-    """Run a fixed-length deterministic probe without modifying training state."""
-    probe_cfg = replace(cfg, is_training=False, max_steps=float("inf"))
+    """Evaluate one fixed-seed deterministic episode per worker.
+
+    This is deliberately an evaluation, not another training rollout: every
+    worker starts from the same seeded world at every call, uses the Beta
+    policy mode, and contributes only until its first homeostatic end or the
+    administrative ``eval_max_steps`` limit.  It therefore makes checkpoint
+    snapshots comparable without mixing policy ages or action-sampling noise.
+    """
+    # Retain the training reset distribution while fixing its seed. Besides
+    # making the evaluation representative, this avoids the extra diagnostic
+    # renders enabled by the environment's ``is_training=False`` path.
+    probe_cfg = replace(cfg, is_training=True, max_steps=cfg.eval_max_steps)
     probe_env = create_env(probe_cfg, multiple_env=True)
     try:
         obs, _ = probe_env.reset(seed=cfg.seed)
@@ -42,17 +52,28 @@ def run_deterministic_stability_probe(world_model, actor, cfg):
         is_first = torch.ones(cfg.num_workers, device=cfg.device)
         recurrent_state = None
         previous_stochastic = None
-        current_is_last = np.zeros(cfg.num_workers, dtype=bool)
+        active = np.ones(cfg.num_workers, dtype=bool)
         episode_age = np.zeros(cfg.num_workers, dtype=np.int64)
         first_flip_step = np.full(cfg.num_workers, -1, dtype=np.int64)
+        final_hunger = np.full(cfg.num_workers, np.nan, dtype=np.float64)
+        final_thirst = np.full(cfg.num_workers, np.nan, dtype=np.float64)
+        food_consumed = np.zeros(cfg.num_workers, dtype=np.float64)
+        water_consumed = np.zeros(cfg.num_workers, dtype=np.float64)
+        homeostatic_ended = np.zeros(cfg.num_workers, dtype=bool)
+        truncated = np.zeros(cfg.num_workers, dtype=bool)
         reward_sum = 0.0
         valid_count = 0
-        episode_count = 0
         postures = []
         action_magnitudes = []
         flipped_rows = []
 
-        for _ in range(cfg.deterministic_probe_steps):
+        # ``RescaleAction(0, 1)`` is active for Dreamer. Its neutral wrapper
+        # action is 0.5, which becomes zero torque in MuJoCo. Finished workers
+        # still occupy an AsyncVectorEnv slot but are excluded from evaluation.
+        neutral_action = np.full(
+            (cfg.num_workers, cfg.action_space_dim), 0.5, dtype=np.float32
+        )
+        while active.any():
             with torch.inference_mode():
                 obs_embed = world_model.encode(obs_to_tensor_dict(obs, cfg))
                 latent, recurrent_state, _, _ = world_model.observe(
@@ -68,11 +89,11 @@ def run_deterministic_stability_probe(world_model, actor, cfg):
                 )
                 action, _, _ = actor(latent, deterministic=True)
                 action = action.detach().cpu().numpy()
+            action[~active] = neutral_action[~active]
 
             next_obs, rewards, terminations, truncations, infos = probe_env.step(action)
-            valid = ~current_is_last
+            valid = active.copy()
             indices = np.flatnonzero(valid)
-            episode_age[current_is_last] = 0
             episode_age[indices] += 1
             reward_sum += float(np.asarray(rewards)[indices].sum())
             valid_count += int(indices.size)
@@ -84,30 +105,68 @@ def run_deterministic_stability_probe(world_model, actor, cfg):
                 posture = np.zeros(cfg.num_workers, dtype=np.float64)
                 flipped = np.zeros(cfg.num_workers, dtype=bool)
             postures.append(posture[indices])
-            action_magnitudes.append(np.linalg.norm(action[indices], axis=1))
+            action_magnitudes.append(
+                np.asarray(infos["action_magnitude"], dtype=np.float64)[indices]
+            )
             flipped_rows.append(flipped[indices])
             newly_flipped = flipped & (first_flip_step < 0)
             first_flip_step[newly_flipped] = episode_age[newly_flipped]
 
             episode_end = np.asarray(terminations) | np.asarray(truncations)
-            episode_count += int((episode_end & valid).sum())
-            next_is_first = current_is_last
+            finished = valid & episode_end
+            if finished.any():
+                final_hunger[finished] = np.asarray(
+                    infos["hunger"], dtype=np.float64
+                )[finished]
+                final_thirst[finished] = np.asarray(
+                    infos["thirst"], dtype=np.float64
+                )[finished]
+                food_consumed[finished] = np.asarray(
+                    infos["food_consumed"], dtype=np.float64
+                )[finished]
+                water_consumed[finished] = np.asarray(
+                    infos["water_consumed"], dtype=np.float64
+                )[finished]
+                homeostatic_ended[finished] = np.asarray(
+                    terminations, dtype=bool
+                )[finished]
+                truncated[finished] = np.asarray(truncations, dtype=bool)[finished]
+                active[finished] = False
+
             previous_action_np = action.copy()
-            previous_action_np[next_is_first] = 0.0
+            previous_action_np[~active] = neutral_action[~active]
             previous_action = to_tensor(previous_action_np, cfg.device)
-            is_first = to_tensor(next_is_first, cfg.device)
-            recurrent_state = recurrent_state * (1.0 - is_first.unsqueeze(-1))
-            previous_stochastic = previous_stochastic * (
-                1.0 - is_first.view(-1, 1, 1)
-            )
-            current_is_last = episode_end.astype(bool, copy=True)
+            is_first = torch.zeros(cfg.num_workers, device=cfg.device)
             obs = next_obs
 
         posture_values = np.concatenate(postures)
         magnitude_values = np.concatenate(action_magnitudes)
         flipped_values = np.concatenate(flipped_rows)
         observed_first_flips = first_flip_step[first_flip_step >= 0]
+        resource_rates = (food_consumed + water_consumed) / episode_age
         return {
+            "deterministic_eval/episodes": float(cfg.num_workers),
+            "deterministic_eval/survival_length_mean": float(episode_age.mean()),
+            "deterministic_eval/survival_length_median": float(
+                np.median(episode_age)
+            ),
+            "deterministic_eval/survival_length_p10": float(
+                np.percentile(episode_age, 10)
+            ),
+            "deterministic_eval/survival_length_p90": float(
+                np.percentile(episode_age, 90)
+            ),
+            "deterministic_eval/homeostatic_end_fraction": float(
+                homeostatic_ended.mean()
+            ),
+            "deterministic_eval/eval_limit_fraction": float(truncated.mean()),
+            "deterministic_eval/food_consumed_mean": float(food_consumed.mean()),
+            "deterministic_eval/water_consumed_mean": float(water_consumed.mean()),
+            "deterministic_eval/resource_per_step_mean": float(
+                resource_rates.mean()
+            ),
+            "deterministic_eval/final_hunger_mean": float(final_hunger.mean()),
+            "deterministic_eval/final_thirst_mean": float(final_thirst.mean()),
             "deterministic_probe/reward_per_step": (
                 reward_sum / valid_count if valid_count else 0.0
             ),
@@ -131,7 +190,7 @@ def run_deterministic_stability_probe(world_model, actor, cfg):
             "deterministic_probe/first_flip_step_mean": float(
                 observed_first_flips.mean() if observed_first_flips.size else -1.0
             ),
-            "deterministic_probe/completed_episodes": float(episode_count),
+            "deterministic_probe/completed_episodes": float(cfg.num_workers),
             "deterministic_probe/valid_transitions": float(valid_count),
         }
     finally:
