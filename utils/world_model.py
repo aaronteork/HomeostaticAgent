@@ -318,6 +318,80 @@ class BlockGRUCell(nn.Module):
         return update * candidate + (1.0 - update) * deter
 
 
+class BlockGRUSRUCell(BlockGRUCell):
+    """BlockGRUCell with an SRU-style candidate transform.
+
+    The inherited BlockGRU path is intentionally unchanged: it jointly
+    projects reset, candidate, and update values from the recurrent dynamics
+    features.  The only added path is ``transform_gate``, which receives the
+    flattened stochastic state and the bounded action, and multiplicatively
+    gates the candidate before the existing tanh nonlinearity.
+    """
+
+    def __init__(
+        self,
+        deter_size: int,
+        stoch_size: int,
+        action_size: int,
+        hidden_size: int,
+        blocks: int = 8,
+        dyn_layers: int = 1,
+    ) -> None:
+        super().__init__(
+            deter_size=deter_size,
+            stoch_size=stoch_size,
+            action_size=action_size,
+            hidden_size=hidden_size,
+            blocks=blocks,
+            dyn_layers=dyn_layers,
+        )
+        # Unlike the recurrent gate projection, this SRU-style gate has no
+        # deterministic-state input. It is conditioned only on stochastic
+        # state and the action that drives this RSSM transition.
+        self.transform_gate = nn.Linear(
+            stoch_size + action_size, deter_size
+        )
+
+    def forward(self, stoch: Tensor, deter: Tensor, action: Tensor) -> Tensor:
+        stoch = stoch.reshape(*stoch.shape[:-2], self.stoch_size)
+        action = action / torch.clamp(torch.abs(action), min=1.0).detach()
+
+        global_features = torch.cat(
+            [
+                self.deter_input(deter),
+                self.stoch_input(stoch),
+                self.action_input(action),
+            ],
+            dim=-1,
+        )
+        repeated_features = global_features.unsqueeze(-2).expand(
+            *global_features.shape[:-1], self.blocks, global_features.shape[-1]
+        )
+        grouped_deter = deter.reshape(
+            *deter.shape[:-1], self.blocks, self.deter_block_size
+        )
+        x = torch.cat([grouped_deter, repeated_features], dim=-1).reshape(
+            *deter.shape[:-1], -1
+        )
+        for layer in self.dynamic_layers:
+            x = layer(x)
+
+        # Keep BlockGRU's jointly projected reset, candidate, and update gates.
+        gates = self.gate_projection(x).reshape(
+            *deter.shape[:-1], self.blocks, 3 * self.deter_block_size
+        )
+        reset, candidate, update = gates.chunk(3, dim=-1)
+        reset = reset.reshape(*deter.shape[:-1], self.deter_size).sigmoid()
+        candidate = candidate.reshape(*deter.shape[:-1], self.deter_size)
+        update = update.reshape(*deter.shape[:-1], self.deter_size)
+
+        sru_input = torch.cat([stoch, action], dim=-1)
+        transform_gate = self.transform_gate(sru_input)
+        candidate = torch.tanh(transform_gate * reset * candidate)
+        update = torch.sigmoid(update - 1.0)
+        return update * candidate + (1.0 - update) * deter
+
+
 class RSSM(nn.Module):
     """DreamerV3-style recurrent state-space model.
 
@@ -335,14 +409,24 @@ class RSSM(nn.Module):
         self.stochastic_size = config.stochastic_units * config.discrete_classes
         self.feature_dim = config.latent_dim
         self.unimix = config.rssm_unimix
-        self.gru = BlockGRUCell(
-            deter_size=self.recurrent_units,
-            stoch_size=self.stochastic_size,
-            action_size=config.action_space_dim,
-            hidden_size=config.hidden_dim,
-            blocks=config.rssm_blocks,
-            dyn_layers=config.rssm_dyn_layers,
-        )
+        if config.use_sru:
+            self.gru = BlockGRUSRUCell(
+                deter_size=self.recurrent_units,
+                stoch_size=self.stochastic_size,
+                action_size=config.action_space_dim,
+                hidden_size=config.hidden_dim,
+                blocks=config.rssm_blocks,
+                dyn_layers=config.rssm_dyn_layers,
+            )
+        else:
+            self.gru = BlockGRUCell(
+                deter_size=self.recurrent_units,
+                stoch_size=self.stochastic_size,
+                action_size=config.action_space_dim,
+                hidden_size=config.hidden_dim,
+                blocks=config.rssm_blocks,
+                dyn_layers=config.rssm_dyn_layers,
+            )
 
         # Both prior and posterior networks are MLPs with one hidden layer, outputting logits for the categorical distribution
         # Prior network uses 2 layers MLP while posterior network uses 1 layer MLP.

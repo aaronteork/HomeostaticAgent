@@ -24,7 +24,7 @@ class DreamerConfig(EnvConfig):
     train_metrics_interval: int = 25_000
     rollout_metrics_interval: int = 50_000
     per_joint_metrics_interval: int = 500_000
-    deterministic_probe_interval: int = 1_000_000
+    deterministic_probe_interval: int = 500_000
     # total_updates: int = 1_000
     adam_eps: float = 1e-5
     laprop_eps: float = 1e-20
@@ -93,6 +93,9 @@ class DreamerConfig(EnvConfig):
     horizon: int = 333
     contdisc: bool = True
     gae_lambda: float = 0.95
+
+    # Use Spatially-enhanced Recurrent Unit
+    use_sru: bool = True
 
     def __post_init__(self):
         if self.replay_context < 0:
