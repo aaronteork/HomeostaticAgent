@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Literal
 from configs.config_env import EnvConfig
 
 
@@ -97,7 +98,18 @@ class DreamerConfig(EnvConfig):
     # Use Spatially-enhanced Recurrent Unit
     use_sru: bool = True
 
+    # Rectified HarmonyDream loss mode. ``all`` independently moderates
+    # vision, proprioception, internal state, reward, and the combined KL;
+    # ``harmony`` follows the paper's observation/reward/KL grouping.
+    # ``none`` preserves the fixed-weight Dreamer objective and is the default
+    # so old checkpoints without harmonizer state remain loadable.
+    harmony_dream_loss: Literal["none", "harmony", "all"] = "none"
+
     def __post_init__(self):
+        if self.harmony_dream_loss not in ("none", "harmony", "all"):
+            raise ValueError(
+                "harmony_dream_loss must be one of 'none', 'harmony', or 'all'"
+            )
         if self.replay_context < 0:
             raise ValueError("replay_context must be non-negative")
         if self.train_metrics_interval <= 0:

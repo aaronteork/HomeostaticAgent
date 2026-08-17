@@ -11,6 +11,14 @@ from torch.distributions import (
 from configs.config_dreamer import DreamerConfig
 
 
+def _rectified_harmony_term(raw_loss: Tensor, log_sigma: Tensor):
+    """Return HarmonyDream's stable rectified term and its diagnostics."""
+    coefficient = torch.exp(-log_sigma)
+    regularizer = F.softplus(log_sigma)
+    weighted_loss = coefficient * raw_loss
+    return weighted_loss + regularizer, coefficient, regularizer, weighted_loss
+
+
 # ---------------- Helper functions ---------------------------
 def to_tensor(value, device, dtype=torch.float32):
     """Convert numpy arrays or tensors to float tensors on the training device."""
@@ -221,6 +229,8 @@ def compute_world_model_loss(
     initial_stochastic=None,
     initial_recurrent=None,
     return_latents=False,
+    *,
+    harmony=None,
 ):
     """
     Compute complete world model loss: reconstruction + KL + reward + continue.
@@ -240,6 +250,8 @@ def compute_world_model_loss(
             homeostatic task has no absorbing value terminals, so these targets
             remain false even when an episode resets.
         config: DreamerConfig
+        harmony: a ``HarmonyLossScales`` module from the owning world model.
+            Required when ``config.harmony_dream_loss`` is not ``"none"``.
 
     Returns:
         loss: scalar loss
@@ -340,14 +352,59 @@ def compute_world_model_loss(
     continue_loss = F.binary_cross_entropy_with_logits(
         predicted_continue_logits, continue_target
     )
+    kl_loss = config.dyn_loss_weight * dyn_loss + config.rep_loss_weight * rep_loss
+
     # ===== Combined Loss with Weighting =====
-    loss = (
-        recon_loss
-        + config.reward_weight * reward_loss
-        + config.continue_weight * continue_loss
-        + config.dyn_loss_weight * dyn_loss
-        + config.rep_loss_weight * rep_loss
-    )
+    harmony_metrics = {}
+    if config.harmony_dream_loss == "none":
+        loss = (
+            recon_loss
+            + config.reward_weight * reward_loss
+            + config.continue_weight * continue_loss
+            + kl_loss
+        )
+    else:
+        if harmony is None:
+            raise ValueError(
+                "HarmonyDream is enabled but no HarmonyLossScales module was provided"
+            )
+        if config.harmony_dream_loss == "harmony":
+            harmony_terms = {
+                "observation": recon_loss,
+                "reward": reward_loss,
+                "kl": kl_loss,
+            }
+        else:
+            # In five-way mode, learned coefficients replace the fixed vision,
+            # proprioception, internal-state, and reward coefficients. The
+            # dyn/rep weights remain the intentional balance inside the KL.
+            harmony_terms = {
+                "vision": recon_losses["vision"],
+                "proprioception": recon_losses["proprioception"],
+                "internal_state": recon_losses["internal_state"],
+                "reward": reward_loss,
+                "kl": kl_loss,
+            }
+        harmony_loss = torch.zeros((), device=reward_loss.device)
+        for name, raw_loss in harmony_terms.items():
+            term, coefficient, regularizer, weighted_loss = _rectified_harmony_term(
+                raw_loss, harmony.log_sigmas[name]
+            )
+            harmony_loss = harmony_loss + term
+            harmony_metrics.update(
+                {
+                    f"world_model/harmony_{name}_raw_loss": raw_loss.detach().item(),
+                    f"world_model/harmony_{name}_log_sigma": harmony.log_sigmas[
+                        name
+                    ].detach().item(),
+                    f"world_model/harmony_{name}_coefficient": coefficient.detach().item(),
+                    f"world_model/harmony_{name}_regularizer": regularizer.detach().item(),
+                    f"world_model/harmony_{name}_weighted_loss": weighted_loss.detach().item(),
+                }
+            )
+        # Continuation remains a fixed auxiliary term in this homeostatic-only,
+        # nonterminal-value task.
+        loss = harmony_loss + config.continue_weight * continue_loss
 
     metrics = {
         "world_model/total_loss": loss.item(),
@@ -371,6 +428,7 @@ def compute_world_model_loss(
             predicted_continue_logits
         ).mean().item(),
     }
+    metrics.update(harmony_metrics)
     if "heat_sensor" in recon_losses:
         metrics["world_model/reconstruction_heat_sensor_loss"] = recon_losses[
             "heat_sensor"

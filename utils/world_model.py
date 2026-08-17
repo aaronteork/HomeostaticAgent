@@ -909,6 +909,25 @@ class ContinuePredictor(nn.Module):
         return self.continue_projection(self.net(latent))
 
 
+class HarmonyLossScales(nn.Module):
+    """Checkpointed log-scales for a selected rectified HarmonyDream objective."""
+
+    def __init__(self, mode: str):
+        super().__init__()
+        names_by_mode = {
+            "harmony": ("observation", "reward", "kl"),
+            "all": ("vision", "proprioception", "internal_state", "reward", "kl"),
+        }
+        try:
+            names = names_by_mode[mode]
+        except KeyError as error:
+            raise ValueError(f"Unsupported HarmonyDream mode: {mode}") from error
+        # sigma = exp(s) begins at one for every term.
+        self.log_sigmas = nn.ParameterDict(
+            {name: nn.Parameter(torch.zeros(())) for name in names}
+        )
+
+
 class WorldModel(nn.Module):
     """Thin orchestration module for Dreamer world-model components."""
 
@@ -920,6 +939,11 @@ class WorldModel(nn.Module):
         self.decoder = ObservationDecoder(config)
         self.reward_predictor = RewardPredictor(config)
         self.continue_predictor = ContinuePredictor(config)
+        self.harmony = (
+            None
+            if config.harmony_dream_loss == "none"
+            else HarmonyLossScales(config.harmony_dream_loss)
+        )
 
     def encode(self, obs):
         return self.encoder(obs)
