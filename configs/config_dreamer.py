@@ -96,7 +96,7 @@ class DreamerConfig(EnvConfig):
     gae_lambda: float = 0.95
 
     # Use Spatially-enhanced Recurrent Unit
-    use_sru: bool = True
+    use_sru: bool = False
 
     # Rectified HarmonyDream loss mode. ``all`` independently moderates
     # vision, proprioception, internal state, reward, and the combined KL;
