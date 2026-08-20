@@ -638,88 +638,8 @@ class RSSM(nn.Module):
         return latent_stack, recurrent_state, prior_dists, posterior_dists
 
 
-# class ActorNetwork(nn.Module):
-#     """Actor network for policy in latent space."""
-
-#     def __init__(self, config: DreamerConfig):
-#         super().__init__()
-#         self.config = config
-#         input_dim = config.latent_dim
-#         action_dim = config.action_space_dim
-
-#         self.net = MLP(
-#             config, input_dim=input_dim, output_dim=config.hidden_dim, num_layers=3
-#         )
-
-#         # DreamerV3 bounded-normal policy parameters in the Ant's native
-#         # [-1, 1] action coordinates. "Bounded" refers to the tanh-bounded
-#         # mean; stochastic Normal samples remain unbounded and are clipped at
-#         # the environment and RSSM boundaries, as in the upstream code.
-#         self.mean_head = nn.Linear(config.hidden_dim, action_dim)
-#         self.std_head = nn.Linear(config.hidden_dim, action_dim)
-
-#         self._init_weights()
-
-#     def _init_weights(self):
-#         for module in self.modules():
-#             if isinstance(module, nn.Linear):
-#                 nn.init.orthogonal_(module.weight)
-#                 nn.init.zeros_(module.bias)
-#         # Match DreamerV3's small policy output scale without shrinking the
-#         # actor's hidden layers.
-#         nn.init.orthogonal_(self.mean_head.weight, gain=self.config.actor_outscale)
-#         nn.init.orthogonal_(self.std_head.weight, gain=self.config.actor_outscale)
-
-#     def forward(self, latent, deterministic=False):
-#         """
-#         Forward pass to get action distribution.
-
-#         Args:
-#             latent: (batch, latent_dim) or (batch, seq_len, latent_dim)
-#             deterministic: if True, return the distribution mode
-
-#         Returns:
-#             action: (batch, action_dim) or (batch, seq_len, action_dim)
-#             log_prob: (batch,) or (batch, seq_len)
-#         """
-#         if len(latent.shape) == 3:
-#             batch_size, seq_len, latent_dim = latent.shape
-#             latent_flat = latent.reshape(batch_size * seq_len, latent_dim)
-#             squeeze_output = True
-#         else:
-#             batch_size = latent.shape[0]
-#             latent_flat = latent
-#             squeeze_output = False
-
-#         x = self.net(latent_flat)
-#         raw_mean = self.mean_head(x)
-#         raw_std = self.std_head(x)
-
-#         loc = torch.tanh(raw_mean)  # bounded center in [-1, 1]
-#         std = self.config.actor_min_std + (
-#             self.config.actor_max_std - self.config.actor_min_std
-#         ) * torch.sigmoid(raw_std + 2.0)
-
-#         dist = Independent(Normal(loc=loc, scale=std), 1)
-
-#         if deterministic:
-#             action = dist.mode
-#         else:
-#             action = dist.rsample()
-
-#         # Independent treats the final action dimension as one event, so
-#         # log_prob and entropy are already joint over all joints.
-#         log_prob = dist.log_prob(action)
-
-#         if squeeze_output:
-#             action = action.view(batch_size, seq_len, -1)
-#             log_prob = log_prob.view(batch_size, seq_len)
-
-#         return action, log_prob, dist
-
-
-class ActorNetwork(nn.Module):
-    """Actor network for policy in latent space."""
+class GaussianActorNetwork(nn.Module):
+    """Gaussian Actor network for policy in latent space."""
 
     def __init__(self, config: DreamerConfig):
         super().__init__()
@@ -735,6 +655,83 @@ class ActorNetwork(nn.Module):
         # [-1, 1] action coordinates. "Bounded" refers to the tanh-bounded
         # mean; stochastic Normal samples remain unbounded and are clipped at
         # the environment and RSSM boundaries, as in the upstream code.
+        self.mean_head = nn.Linear(config.hidden_dim, action_dim)
+        self.std_head = nn.Linear(config.hidden_dim, action_dim)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight)
+                nn.init.zeros_(module.bias)
+        # Match DreamerV3's small policy output scale without shrinking the
+        # actor's hidden layers.
+        nn.init.orthogonal_(self.mean_head.weight, gain=self.config.actor_outscale)
+        nn.init.orthogonal_(self.std_head.weight, gain=self.config.actor_outscale)
+
+    def forward(self, latent, deterministic=False):
+        """
+        Forward pass to get action distribution.
+
+        Args:
+            latent: (batch, latent_dim) or (batch, seq_len, latent_dim)
+            deterministic: if True, return the distribution mode
+
+        Returns:
+            action: (batch, action_dim) or (batch, seq_len, action_dim)
+            log_prob: (batch,) or (batch, seq_len)
+        """
+        if len(latent.shape) == 3:
+            batch_size, seq_len, latent_dim = latent.shape
+            latent_flat = latent.reshape(batch_size * seq_len, latent_dim)
+            squeeze_output = True
+        else:
+            batch_size = latent.shape[0]
+            latent_flat = latent
+            squeeze_output = False
+
+        x = self.net(latent_flat)
+        raw_mean = self.mean_head(x)
+        raw_std = self.std_head(x)
+
+        loc = torch.tanh(raw_mean)  # bounded center in [-1, 1]
+        std = self.config.actor_min_std + (
+            self.config.actor_max_std - self.config.actor_min_std
+        ) * torch.sigmoid(raw_std + 2.0)
+
+        dist = Independent(Normal(loc=loc, scale=std), 1)
+
+        if deterministic:
+            action = dist.mode
+        else:
+            action = dist.rsample()
+
+        # Independent treats the final action dimension as one event, so
+        # log_prob and entropy are already joint over all joints.
+        log_prob = dist.log_prob(action)
+
+        if squeeze_output:
+            action = action.view(batch_size, seq_len, -1)
+            log_prob = log_prob.view(batch_size, seq_len)
+
+        return action, log_prob, dist
+
+
+class BetaActorNetwork(nn.Module):
+    """BetaActor network for policy in latent space."""
+
+    def __init__(self, config: DreamerConfig):
+        super().__init__()
+        self.config = config
+        input_dim = config.latent_dim
+        action_dim = config.action_space_dim
+
+        self.net = MLP(
+            config, input_dim=input_dim, output_dim=config.hidden_dim, num_layers=3
+        )
+
+        # Beta Distribution instead
         self.alpha = nn.Sequential(
             nn.Linear(config.hidden_dim, action_dim),
             nn.Softplus()

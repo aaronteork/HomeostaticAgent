@@ -16,7 +16,7 @@ class DreamerConfig(EnvConfig):
     mlp_n_layers: int = 3
     batch_size: int = 16
     batch_length: int = 64
-    total_env_steps: int = 5_000_000
+    total_env_steps: int = 3_000_000
     replay_ratio: int = 32
     # Keep scalar diagnostics useful without making SQLite telemetry a material
     # part of the training loop. The deterministic evaluation is deliberately
@@ -65,7 +65,7 @@ class DreamerConfig(EnvConfig):
     imagine_batch_size: int = 16
     # world_model_grad_steps_per_update: int = 1
     # world_model_lr: float = 1e-4
-    ent_coef: float = 0.005  # 3e-4
+    ent_coef: float = 3e-4
     return_norm_rate: float = 0.01
     return_norm_limit: float = 1.0
     return_norm_percentile_low: float = 5.0
@@ -77,6 +77,8 @@ class DreamerConfig(EnvConfig):
     # defined and prevents boundary-singular concentrations.
     actor_min_concentration: float = 1.0
     actor_outscale: float = 0.01
+    actor_min_std: float = 0.1
+    actor_max_std: float = 1.0
     # actor_lr: float = 3e-5
     # actor_critic_grad_steps_per_update: int = 1
     # actor_grad_norm_clip: float = 100.0
@@ -103,7 +105,7 @@ class DreamerConfig(EnvConfig):
     # ``harmony`` follows the paper's observation/reward/KL grouping.
     # ``none`` preserves the fixed-weight Dreamer objective and is the default
     # so old checkpoints without harmonizer state remain loadable.
-    harmony_dream_loss: Literal["none", "harmony", "all"] = "none"
+    harmony_dream_loss: Literal["none", "harmony", "all"] = "all"
 
     def __post_init__(self):
         if self.harmony_dream_loss not in ("none", "harmony", "all"):
