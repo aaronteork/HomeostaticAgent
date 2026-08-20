@@ -56,28 +56,6 @@ def symlog(x: Tensor) -> Tensor:
     return torch.sign(x) * torch.log(1 + torch.abs(x))
 
 
-def reconstruction_head_losses(
-    reconstructed_obs: dict[str, Tensor], obs: dict[str, Tensor]
-) -> dict[str, Tensor]:
-    """Return equally-normalized reconstruction losses for each observation head.
-
-    Each head averages its own feature dimensions before averaging batch/time.
-    Thus an unweighted head reports per-element MSE regardless of whether it is
-    an RGB-D image or a small vector. Vector targets remain in symlog space to
-    match the vector decoder outputs.
-    """
-    losses: dict[str, Tensor] = {}
-    for key, reconstruction in reconstructed_obs.items():
-        target = obs[key].detach()
-        if key == "vision":
-            errors = F.mse_loss(reconstruction, target, reduction="none")
-            losses[key] = errors.mean(dim=(-3, -2, -1)).mean()
-        else:
-            errors = F.mse_loss(reconstruction, symlog(target), reduction="none")
-            losses[key] = errors.mean(dim=-1).mean()
-    return losses
-
-
 def symexp(x: Tensor) -> Tensor:
     return torch.sign(x) * (torch.exp(torch.abs(x)) - 1)
 
@@ -276,12 +254,11 @@ def compute_world_model_loss(
     # internal-state heads. The explicit config weights now genuinely express
     # relative head-level importance.
     reconstructed_obs = decoder(latent)
-    # recon_losses = reconstruction_head_losses(reconstructed_obs, obs)
     recon_losses = {
         key: F.mse_loss(reconstructed_obs[key], obs[key].detach(), reduction="none").sum(dim=(-3, -2, -1)).mean()
         if key == "vision"
         else F.mse_loss(reconstructed_obs[key], symlog(obs[key].detach()), reduction="none").sum(dim=-1).mean()
-        for key in reconstructed_obs.keys()
+        for key in reconstructed_obs
     }
     recon_loss = (
         config.vision_reconstruction_weight * recon_losses["vision"]
@@ -341,9 +318,7 @@ def compute_world_model_loss(
     # ===== Continue Prediction Loss =====
     # DreamerV3 predicts continuation, and with contdisc enabled it predicts the
     # discounted continuation used directly in lambda returns.
-    # BCE on sigmoid probabilities is not autocast-safe. Train directly from
-    # logits, while the predictor's normal forward path continues to expose
-    # probabilities for imagination and diagnostics.
+    # Continue is a fixed value sisnce we dont have terminals
     predicted_continue_logits = continue_predictor.forward_logits(latent)
     terminal_target = terminal.contiguous().view(batch_size, seq_len, 1).float()
     continue_target = 1.0 - terminal_target
@@ -496,8 +471,6 @@ def imagination_rollout(
     for step in range(horizon):
         action, _, dist = actor(latent.detach(), deterministic=False)
         imagined_actions.append(action)
-        # The affine-Beta actor returns native [-1, 1] actions and joint
-        # log-probabilities/entropies already reduced over action joints.
         imagined_log_probs.append(dist.log_prob(action.detach()))
         imagined_entropies.append(dist.entropy())
 
@@ -623,10 +596,11 @@ def compute_replay_lambda_returns(
 ):
     """Return imagination-annotated replay targets without crossing boundaries.
 
-    True terminals suppress bootstrapping. Nonterminal ``is_last`` rows stop
-    the lambda trace but retain a one-step bootstrap from their final
+    Nonterminal ``is_last`` rows stop the lambda trace but retain a one-step bootstrap from their final
     observation. The caller supplies a direct critic value at such boundaries
     and imagination-return annotations at ordinary replay states.
+    
+    We assume no terminals in our task
     """
     if rewards.shape[1] < 2:
         raise ValueError("Replay value loss needs at least two timesteps")
@@ -868,76 +842,12 @@ def compute_actor_critic_loss(
         "actor_critic/critic_replay_slow_loss": replay_slow_loss.item(),
         "actor_critic/critic_replay_weighted_loss": replay_weighted_loss.item(),
         "actor_critic/entropy": entropy.item(),
-        # "actor_critic/actor_objective": actor_objective.item(),
-        # "actor_critic/average_return": critic_returns.mean().item(),
-        # "actor_critic/return_norm_offset": return_offset.item(),
-        # "actor_critic/return_norm_scale": return_scale.item(),
-        # "actor_critic/average_advantage": advantages.mean().item(),
-        # "actor_critic/advantage_std": advantages.std().item(),
-        # "actor_critic/log_prob": log_probs.mean().item(),
         "actor_critic/explained_variance": explained_variance,
     }
     if replay_returns is not None:
         metrics["actor_critic/replay_return"] = replay_returns.mean().item()
 
     return actor_loss, critic_loss, metrics
-
-
-# ------------------ Helper Classes ---------------------------
-# From https://github.com/Eclectic-Sheep/sheeprl/blob/main/sheeprl/utils/distribution.py
-class TwoHotEncodingDistribution:
-    def __init__(
-        self,
-        logits: Tensor,
-        dims: int = 0,
-        low: int = -20,
-        high: int = 20,
-        transfwd: Callable[[Tensor], Tensor] = symlog,
-        transbwd: Callable[[Tensor], Tensor] = symexp,
-    ):
-        self.logits = logits
-        self.probs = F.softmax(logits, dim=-1)
-        self.dims = tuple([-x for x in range(1, dims + 1)])
-        self.bins = torch.linspace(low, high, logits.shape[-1], device=logits.device)
-        self.low = low
-        self.high = high
-        self.transfwd = transfwd
-        self.transbwd = transbwd
-        self._batch_shape = logits.shape[: len(logits.shape) - dims]
-        self._event_shape = logits.shape[len(logits.shape) - dims : -1] + (1,)
-
-    @property
-    def mean(self) -> Tensor:
-        return self.transbwd((self.probs * self.bins).sum(dim=self.dims, keepdim=True))
-
-    @property
-    def mode(self) -> Tensor:
-        return self.transbwd((self.probs * self.bins).sum(dim=self.dims, keepdim=True))
-
-    def log_prob(self, x: Tensor) -> Tensor:
-        x = self.transfwd(x)
-        # below in [-1, len(self.bins) - 1]
-        below = (self.bins <= x).type(torch.int32).sum(dim=-1, keepdim=True) - 1
-        # above in [0, len(self.bins)]
-        above = below + 1
-
-        # above in [0, len(self.bins) - 1]
-        above = torch.minimum(above, torch.full_like(above, len(self.bins) - 1))
-        # below in [0, len(self.bins) - 1]
-        below = torch.maximum(below, torch.zeros_like(below))
-
-        equal = below == above
-        dist_to_below = torch.where(equal, 1, torch.abs(self.bins[below] - x))
-        dist_to_above = torch.where(equal, 1, torch.abs(self.bins[above] - x))
-        total = dist_to_below + dist_to_above
-        weight_below = dist_to_above / total
-        weight_above = dist_to_below / total
-        target = (
-            F.one_hot(below, len(self.bins)) * weight_below[..., None]
-            + F.one_hot(above, len(self.bins)) * weight_above[..., None]
-        ).squeeze(-2)
-        log_pred = self.logits - torch.logsumexp(self.logits, dim=-1, keepdims=True)
-        return (target * log_pred).sum(dim=self.dims)
 
 
 # From https://github.com/NM512/r2dreamer/blob/546e4fab8146ea4b14e1d7726bbc1a8a1d50322f/distributions.py

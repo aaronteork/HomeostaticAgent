@@ -137,15 +137,11 @@ class ObservationDecoder(nn.Module):
         # Proprioception
         proprioception = self.proprioception_decoder(latent)
         proprioception = self.proprioception_decoder_projection(proprioception)
-        # proprioception = symexp(
-        #     proprioception
-        # )  # Apply symexp to map back to original scale
+
         # Internal state
         internal_state = self.internal_state_decoder(latent)
         internal_state = self.internal_state_decoder_projection(internal_state)
-        # internal_state = symexp(
-        #     internal_state
-        # )  # Apply symexp to map back to original scale
+
         return {
             "vision": vision,
             "proprioception": proprioception,
@@ -775,8 +771,8 @@ class BetaActorNetwork(nn.Module):
             squeeze_output = False
 
         x = self.net(latent_flat)
-        a = self.alpha(x) + 1
-        b = self.beta(x) + 1
+        a = self.alpha(x) + self.config.actor_min_concentration
+        b = self.beta(x) + self.config.actor_min_concentration
         dist = Independent(Beta(a, b), 1)
 
         if deterministic:

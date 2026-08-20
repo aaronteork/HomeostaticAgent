@@ -27,7 +27,7 @@ from utils.utils_dreamer import (
 )
 from utils.utils_env import create_env
 from utils.utils_logger import create_logger
-from utils.world_model import ActorNetwork, CriticNetwork, WorldModel
+from utils.world_model import BetaActorNetwork, GaussianActorNetwork , CriticNetwork, WorldModel
 
 
 def train_dreamer():
@@ -53,8 +53,12 @@ def train_dreamer():
     )
 
     # Create environment
-    env = create_env(cfg, multiple_env=True)
-    # frame_skip = env.envs[0].unwrapped.frame_skip
+    if cfg.actor_policy == "beta":
+        env = create_env(cfg, multiple_env=True, rescale_action=True)
+    elif cfg.actor_policy == "gaussian":
+        env = create_env(cfg, multiple_env=True, rescale_action=False)
+    else:
+        NotImplementedError(f"Actor policy {cfg.actor_policy} not implemented")
     logger.info(f"Created parallel environment with {cfg.num_workers} workers")
 
     # Create world model
@@ -73,7 +77,10 @@ def train_dreamer():
     logger.info("Created world model")
 
     # Create actor-critic
-    actor = ActorNetwork(cfg)
+    if cfg.actor_policy == "beta":
+        actor = BetaActorNetwork(cfg)
+    elif cfg.actor_policy == "gaussian":
+        actor = GaussianActorNetwork(cfg)
     actor.to(cfg.device)
     critic = CriticNetwork(cfg)
     critic.to(cfg.device)
@@ -169,6 +176,7 @@ def train_dreamer():
             "world_model": world_model.state_dict(),
             "actor": actor.state_dict(),
             "critic": critic.state_dict(),
+            "config": asdict(cfg)
         },
         checkpoint_path
     )
@@ -414,9 +422,6 @@ def train_dreamer():
                 while env_transition_step >= next_per_joint_metrics_step:
                     next_per_joint_metrics_step += cfg.per_joint_metrics_interval
 
-            # avg_episode_length = sum(list_iterations_episode_length) / len(list_iterations_episode_length) if list_iterations_episode_length else 0
-            # avg_wm_loss = 0.0
-            # avg_reconstruction_loss = 0.0
             actor_loss = None
             critic_loss = None
             actor_loss_value = None
@@ -427,11 +432,6 @@ def train_dreamer():
             train_batches_due = 0
             wm_sample_failures = 0
             wm_metrics = {}
-            # last_actor_grad_norm = 0.0
-            # avg_reward_loss = 0.0
-            # avg_continue_loss = 0.0
-            # replay_terminal_count = 0.0
-            # replay_terminal_items = 0
             if len(replay_buffer) >= cfg.min_buffer_size_before_training:
                 # if not replay_ratio_started:
                 #     # Do not retrospectively schedule updates for the replay
@@ -657,16 +657,6 @@ def train_dreamer():
                         )
                         while global_step >= next_training_metrics_step:
                             next_training_metrics_step += cfg.train_metrics_interval
-                # if total_replay_terminal_items > 0:
-                #     replay_terminal_rate = (
-                #         total_replay_terminal_count / total_replay_terminal_items
-                #     )
-                #     logger.info(
-                #         "ReplayTerminals=%d/%d (%.6f)",
-                #         int(total_replay_terminal_count),
-                #         total_replay_terminal_items,
-                #         replay_terminal_rate,
-                #     )
 
             # Log finished episodes and carry the step outcome to the next
             # replay row, where it is aligned with the resulting observation.
@@ -767,7 +757,7 @@ def train_dreamer():
                     )
             iteration += 1
 
-            if global_step % 100_000 == 0:
+            if global_step % cfg.checkpoint_save_interval == 0:
                 logger.info(f"Global step {global_step}: Saving models...")
                 checkpoint_path = f"./models/dreamer_{timestamp}_chkpt{global_step}.pt"
                 torch.save(
@@ -775,6 +765,7 @@ def train_dreamer():
                         "world_model": world_model.state_dict(),
                         "actor": actor.state_dict(),
                         "critic": critic.state_dict(),
+                        "config": asdict(cfg),
                     },
                     checkpoint_path
                 )
@@ -808,6 +799,7 @@ def train_dreamer():
             "world_model": world_model.state_dict(),
             "actor": actor.state_dict(),
             "critic": critic.state_dict(),
+            "config": asdict(cfg),
         },
         model_path
     )
