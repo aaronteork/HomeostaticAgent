@@ -12,7 +12,7 @@ from tqdm.auto import tqdm
 
 # Dreamer
 from configs.config_dreamer import DreamerConfig
-from utils.world_model import ActorNetwork, WorldModel
+from utils.world_model import BetaActorNetwork, GaussianActorNetwork, WorldModel
 
 # PPO
 from configs.config_ppo import PPOConfig
@@ -351,7 +351,10 @@ def evaluate_agent(args):
     elif args.model == "dreamer":
         config = DreamerConfig(is_training=False, image_size=(512, 512))
         world_model = WorldModel(config).to(config.device)
-        dreamer_actor = ActorNetwork(config).to(config.device)
+        if config.actor_policy == "beta":
+            dreamer_actor = BetaActorNetwork(config).to(config.device)
+        elif config.actor_policy == "gaussian":
+            dreamer_actor = GaussianActorNetwork(config).to(config.device)
         checkpoint = torch.load(args.model_path, map_location=config.device)
         checkpoint["world_model"] = {key.replace("_orig_mod.", ""): value for key, value in checkpoint["world_model"].items()}
         checkpoint["actor"] = {key.replace("_orig_mod.", ""): value for key, value in checkpoint["actor"].items()}
