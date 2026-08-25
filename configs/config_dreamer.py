@@ -14,7 +14,7 @@ class DreamerConfig(EnvConfig):
     train_metrics_interval: int = 25_000
     rollout_metrics_interval: int = 100_000
     per_joint_metrics_interval: int = 500_000
-    checkpoint_save_interval: int = 100_000
+    checkpoint_save_interval: int = 200_000
 
     # Replay buffer parameters
     replay_capacity: int = 1_000_000  # paper is originally 5e6 but reduced for memory reasons
