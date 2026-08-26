@@ -910,6 +910,8 @@ class HarmonyLossScales(nn.Module):
         names_by_mode = {
             "harmony": ("observation", "reward", "kl"),
             "all": ("vision", "proprioception", "internal_state", "reward", "kl"),
+            "all_except_kl": ("vision", "proprioception", "internal_state", "reward"),
+            "observations_only": ("vision", "proprioception", "internal_state"),
         }
         try:
             names = names_by_mode[mode]

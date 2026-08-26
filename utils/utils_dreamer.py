@@ -349,7 +349,7 @@ def compute_world_model_loss(
                 "reward": reward_loss,
                 "kl": kl_loss,
             }
-        else:
+        elif config.harmony_dream_loss == "all":
             # In five-way mode, learned coefficients replace the fixed vision,
             # proprioception, internal-state, and reward coefficients. The
             # dyn/rep weights remain the intentional balance inside the KL.
@@ -360,6 +360,17 @@ def compute_world_model_loss(
                 "reward": reward_loss,
                 "kl": kl_loss,
             }
+        else:
+            # Learn scales for all reconstruction heads and reward prediction,
+            # while retaining Dreamer's explicitly configured KL strength. In
+            # observations_only mode, reward also remains fixed below.
+            harmony_terms = {
+                "vision": recon_losses["vision"],
+                "proprioception": recon_losses["proprioception"],
+                "internal_state": recon_losses["internal_state"],
+            }
+            if config.harmony_dream_loss == "all_except_kl":
+                harmony_terms["reward"] = reward_loss
         harmony_loss = torch.zeros((), device=reward_loss.device)
         for name, raw_loss in harmony_terms.items():
             term, coefficient, regularizer, weighted_loss = _rectified_harmony_term(
@@ -378,8 +389,15 @@ def compute_world_model_loss(
                 }
             )
         # Continuation remains a fixed auxiliary term in this homeostatic-only,
-        # nonterminal-value task.
-        loss = harmony_loss + config.continue_weight * continue_loss
+        # nonterminal-value task. Retain the explicitly configured Dreamer KL
+        # contribution when it is not harmonized; observations_only also keeps
+        # the fixed reward-prediction loss.
+        fixed_loss = config.continue_weight * continue_loss
+        if config.harmony_dream_loss in ("all_except_kl", "observations_only"):
+            fixed_loss = fixed_loss + kl_loss
+        if config.harmony_dream_loss == "observations_only":
+            fixed_loss = fixed_loss + config.reward_weight * reward_loss
+        loss = harmony_loss + fixed_loss
 
     metrics = {
         "world_model/total_loss": loss.item(),

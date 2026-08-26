@@ -32,10 +32,14 @@ class DreamerConfig(EnvConfig):
     use_sru: bool = False
 
     # Rectified HarmonyDream loss mode. ``all`` independently moderates
-    # vision, proprioception, internal state, reward, and the combined KL;
-    # ``harmony`` follows the paper's observation/reward/KL grouping.
-    # ``none`` preserves the fixed-weight Dreamer objective
-    harmony_dream_loss: Literal["none", "harmony", "all"] = "all"
+    # vision, proprioception, internal state, reward, and the combined KL.
+    # ``all_except_kl`` learns the non-KL scales but retains Dreamer's fixed
+    # KL strength. ``observations_only`` learns scales only for reconstruction
+    # heads. ``harmony`` follows the paper's observation/reward/KL grouping.
+    # ``none`` preserves the fixed-weight Dreamer objective.
+    harmony_dream_loss: Literal[
+        "none", "harmony", "all", "all_except_kl", "observations_only"
+    ] = "all_except_kl"
 
     # World Model
     hidden_dim: int = 512
@@ -92,9 +96,16 @@ class DreamerConfig(EnvConfig):
     critic_replay_loss: float = 0.3
 
     def __post_init__(self):
-        if self.harmony_dream_loss not in ("none", "harmony", "all"):
+        if self.harmony_dream_loss not in (
+            "none",
+            "harmony",
+            "all",
+            "all_except_kl",
+            "observations_only",
+        ):
             raise ValueError(
-                "harmony_dream_loss must be one of 'none', 'harmony', or 'all'"
+                "harmony_dream_loss must be one of 'none', 'harmony', 'all', "
+                "'all_except_kl', or 'observations_only'"
             )
         if self.replay_context < 0:
             raise ValueError("replay_context must be non-negative")
