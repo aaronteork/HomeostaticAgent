@@ -22,10 +22,14 @@ class PPOConfig(EnvConfig):
     vf_coef: float = 0.5
     target_kl: float = 0.02
     image_latent_dim: int = 200
-    checkpoint_steps: int = 5_000_000
+    # With 500 updates, this yields six intermediate checkpoints. Together
+    # with the iteration-zero and final policies, that is eight plot points.
+    checkpoint_interval: int = 50
 
     def __post_init__(self):
         if self.comparison_metrics_interval <= 0:
             raise ValueError("comparison_metrics_interval must be positive")
+        if self.checkpoint_interval <= 0:
+            raise ValueError("checkpoint_interval must be positive")
         temp_batch_size = self.rollout_steps * self.num_workers
         object.__setattr__(self, 'batch_size', temp_batch_size)

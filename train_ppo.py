@@ -1,4 +1,6 @@
+import argparse
 import datetime as dt
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from dataclasses import asdict
 
@@ -23,7 +25,7 @@ from utils.utils_ppo import (
 )
 
 
-def train_ppo():
+def train_ppo(args: argparse.Namespace):
 
     # Create logger
     logger = create_logger(name="PPO", log_file="./logs/logs_ppo.log")
@@ -36,6 +38,10 @@ def train_ppo():
     # Get config
     cfg = PPOConfig()
     logger.info(f"Config: {cfg}")
+
+    # Keep every checkpoint from one run together, matching Dreamer's
+    # --model-path interface and making directory-based evaluation direct.
+    model_directory = args.model_path
 
     # Set seed
     set_seed(cfg.seed)
@@ -58,9 +64,8 @@ def train_ppo():
     logger.info("Created PPO agent and optimizer")
 
     # Model path
-    model_path = f"./models/ppo_agent_{dt.datetime.now(ZoneInfo("Asia/Singapore")).strftime('%Y-%m-%d_%H-%M-%S')}.pt"
-    checkpoint_model_path = f"./models/checkpoint_maxsteps_ppo_agent_{dt.datetime.now(ZoneInfo('Asia/Singapore')).strftime('%Y-%m-%d_%H-%M-%S')}.pt"
-    checkpoint_saved = False
+    run_timestamp = dt.datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d_%H-%M-%S")
+    model_path = model_directory / f"ppo_agent_{run_timestamp}_final.pt"
 
     # Test out agent and environment
     logger.info("Running agent and environment")
@@ -78,6 +83,13 @@ def train_ppo():
     # returns its reset observation. Keep the row for temporal alignment and
     # final-observation bootstrapping, but exclude it from PPO optimization.
     reset_only = np.zeros(cfg.num_workers, dtype=bool)
+
+    # The iteration-zero baseline is valuable when plotting survival learning
+    # curves and follows Dreamer's checkpoint convention.
+    checkpoint_path = model_directory / f"ppo_agent_{run_timestamp}_chkpt0.pt"
+    torch.save(agent.state_dict(), checkpoint_path)
+    logger.info("Saved untrained PPO checkpoint to %s", checkpoint_path)
+
     # PPO iterations
     with mlflow.start_run(run_name="PPO Training - " + dt.datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d_%H-%M-%S")):
         mlflow.log_params(asdict(cfg))
@@ -206,12 +218,6 @@ def train_ppo():
                                     "episode/env_transition_step": global_step,
                                 }, step=episodes_finished
                             )
-                if global_step >= cfg.checkpoint_steps and not checkpoint_saved:
-                    torch.save(agent.state_dict(), checkpoint_model_path)
-                    logger.info(f"Model saved to {checkpoint_model_path} at global step {global_step}")
-                    checkpoint_saved = True
-
-
             # Get the value of the very last observation in your rollout
             trajectory = replay_buffer.sample(cfg.rollout_steps * cfg.num_workers)
 
@@ -387,6 +393,23 @@ def train_ppo():
 
             logger.info(f"Iteration {iterations}: Policy Loss={avg_policy_loss:.4f}, Value Loss={avg_value_loss:.4f}, Entropy={avg_entropy:.4f}")
 
+            # Save after the PPO update so the checkpoint number denotes the
+            # number of completed PPO iterations, rather than env steps.
+            completed_iterations = iterations + 1
+            if (
+                completed_iterations % cfg.checkpoint_interval == 0
+                and completed_iterations < cfg.total_updates
+            ):
+                checkpoint_model_path = model_directory / (
+                    f"ppo_agent_{run_timestamp}_chkpt{completed_iterations}.pt"
+                )
+                torch.save(agent.state_dict(), checkpoint_model_path)
+                logger.info(
+                    "Model saved to %s after PPO iteration %s",
+                    checkpoint_model_path,
+                    completed_iterations,
+                )
+
             replay_buffer.empty()
 
             # Clear GPU cache to prevent memory accumulation
@@ -420,4 +443,11 @@ def train_ppo():
     print(f"model saved to {model_path}")
 
 if __name__ == "__main__":
-    train_ppo()
+    parser = argparse.ArgumentParser(description="Train PPO agent")
+    parser.add_argument(
+        "--model-path",
+        type=Path,
+        required=True,
+        help="Directory in which to save PPO checkpoints and the final model.",
+    )
+    train_ppo(parser.parse_args())
