@@ -409,11 +409,11 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
         for obj in self.object:
             type_gen, x, y = obj
             if type_gen == "food":
-                viewer.add_marker(pos=(x, y, 0.5), size=(RESOURCE_MARKER_RADIUS,) * 3, rgba=(1, 0, 0, 1), label=" ", type=mujoco.mjtGeom.mjGEOM_SPHERE)
+                viewer.add_marker(pos=(x, y, 0.5), size=(RESOURCE_MARKER_RADIUS,) * 3, rgba=(0, 1, 0, 1), label=" ", type=mujoco.mjtGeom.mjGEOM_SPHERE)
             elif type_gen == "water":
                 viewer.add_marker(pos=(x, y, 0.5), size=(RESOURCE_MARKER_RADIUS,) * 3, rgba=(0, 0, 1, 1), label=" ", type=mujoco.mjtGeom.mjGEOM_SPHERE)
             elif type_gen == "heat":
-                viewer.add_marker(pos=(x, y, 0.5), size=(RESOURCE_MARKER_RADIUS,) * 3, rgba=(0, 1, 0, 1), label=" ", type=mujoco.mjtGeom.mjGEOM_SPHERE)
+                viewer.add_marker(pos=(x, y, 0.5), size=(RESOURCE_MARKER_RADIUS,) * 3, rgba=(1, 0, 0, 1), label=" ", type=mujoco.mjtGeom.mjGEOM_SPHERE)
 
     def mux_render(self, camera_name):
         cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, camera_name)
