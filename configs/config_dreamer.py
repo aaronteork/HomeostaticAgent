@@ -39,7 +39,7 @@ class DreamerConfig(EnvConfig):
     # ``none`` preserves the fixed-weight Dreamer objective.
     harmony_dream_loss: Literal[
         "none", "harmony", "all", "all_except_kl", "observations_only"
-    ] = "all_except_kl"
+    ] = "observations_only"
 
     # World Model
     hidden_dim: int = 512
@@ -78,12 +78,12 @@ class DreamerConfig(EnvConfig):
     imagine_batch_size: int = 16
 
     # Actor
-    actor_policy: Literal["beta", "gaussian"] = "beta"
+    actor_policy: Literal["beta", "gaussian"] = "gaussian"
     actor_min_concentration: float = 1.0
     actor_outscale: float = 0.01
     actor_min_std: float = 0.1
     actor_max_std: float = 1.0
-    ent_coef: float = 3e-4
+    ent_coef: float = 0.005
 
     # Critic
     return_norm_rate: float = 0.01

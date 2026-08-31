@@ -1,3 +1,4 @@
+import argparse
 import datetime as dt
 from dataclasses import asdict, replace
 from zoneinfo import ZoneInfo
@@ -30,7 +31,7 @@ from utils.utils_logger import create_logger
 from utils.world_model import BetaActorNetwork, GaussianActorNetwork , CriticNetwork, WorldModel
 
 
-def train_dreamer():
+def train_dreamer(args):
 
     # Create logger
     logger = create_logger(name="Dreamer", log_file="./logs/logs_dreamer.log")
@@ -46,6 +47,9 @@ def train_dreamer():
 
     # Set seed
     set_seed(cfg.seed)
+
+    # Directories
+    model_directory = args.model_path
 
     # Check that the config does not have frame stack key
     assert not hasattr(cfg, "frame_stack_key"), (
@@ -102,7 +106,7 @@ def train_dreamer():
 
     # Create model save timestamp
     timestamp = dt.datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d_%H-%M-%S")
-    model_path = f"./models/dreamer_{timestamp}.pt"
+    model_path = f"{model_directory}/dreamer_{timestamp}_final.pt"
 
     # Create replay buffer
     replay_buffer = SequenceReplayBuffer(cfg, device=cfg.device)
@@ -170,7 +174,7 @@ def train_dreamer():
     per_joint_telemetry = RolloutTelemetryWindow(cfg.action_space_dim)
 
     # Save untrained models before starting the training loop
-    checkpoint_path = f"./models/dreamer_{timestamp}_chkpt{global_step}.pt"
+    checkpoint_path = f"{model_directory}/dreamer_{timestamp}_chkpt{global_step}.pt"
     torch.save(
         {
             "world_model": world_model.state_dict(),
@@ -759,7 +763,7 @@ def train_dreamer():
 
             if global_step % cfg.checkpoint_save_interval == 0:
                 logger.info(f"Global step {global_step}: Saving models...")
-                checkpoint_path = f"./models/dreamer_{timestamp}_chkpt{global_step}.pt"
+                checkpoint_path = f"{model_directory}/dreamer_{timestamp}_chkpt{global_step}.pt"
                 torch.save(
                     {
                         "world_model": world_model.state_dict(),
@@ -812,4 +816,7 @@ def train_dreamer():
 
 
 if __name__ == "__main__":
-    train_dreamer()
+    parser = argparse.ArgumentParser(description="Train Dreamer agent")
+    parser.add_argument("--model-path", type=str, help="Path to save the trained model")
+    args = parser.parse_args()
+    train_dreamer(args)
