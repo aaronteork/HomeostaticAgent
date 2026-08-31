@@ -14,6 +14,8 @@ from configs.config_env import EnvConfig
 
 DEFAULT_CAMERA_CONFIG = {}
 RESOURCE_MARKER_RADIUS = 0.5
+WALL_RGBA = "0.5 0.5 0.5 1"
+WALL_HALF_THICKNESS = 0.1
 
 
 def qtoeuler(q):
@@ -51,7 +53,7 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
         worldbody = tree.find(".//worldbody")
 
         # Wall
-        wall_attrs = dict(type="box", rgba="0.5 0.5 0.5 1", conaffinity="1", condim="3")
+        wall_attrs = dict(type="box", rgba=WALL_RGBA, conaffinity="1", condim="3")
         for name, pos, size in [
             ("wall_n", f"0 {self.cfg.arena_size} 0.5", f"{self.cfg.arena_size} 0.1 2.0"),
             ("wall_s", f"0 {-self.cfg.arena_size} 0.5", f"{self.cfg.arena_size} 0.1 2.0"),
@@ -62,6 +64,46 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
                 worldbody,
                 "geom",
                 dict(wall_attrs, name=name, pos=pos, size=size),
+            )
+        # MuJoCo models have a fixed number of geoms after construction.  Add
+        # a pool now and move its members to new random locations at reset.
+        obstacle_size = self.cfg.obstacle_size
+        if len(obstacle_size) != 3 or any(size <= 0 for size in obstacle_size):
+            raise ValueError("obstacle_size must contain three positive half-sizes.")
+        if self.cfg.num_obstacles < 0:
+            raise ValueError("num_obstacles must be non-negative.")
+        if self.cfg.obstacle_clearance < 0:
+            raise ValueError("obstacle_clearance must be non-negative.")
+        if self.cfg.obstacle_placement_attempts <= 0:
+            raise ValueError("obstacle_placement_attempts must be positive.")
+        obstacle_attrs = dict(
+            type="box",
+            rgba=WALL_RGBA,
+            contype="1",
+            conaffinity="1",
+            condim="3",
+        )
+        for index in range(self.cfg.num_obstacles):
+            obstacle_body = ET.SubElement(
+                worldbody,
+                "body",
+                {
+                    "name": f"obstacle_body_{index}",
+                    # A mocap body is kinematic: it is fixed by the environment
+                    # at reset, but its child geom remains part of MuJoCo contact.
+                    "mocap": "true",
+                    "pos": "0 0 -10",
+                },
+            )
+            ET.SubElement(
+                obstacle_body,
+                "geom",
+                dict(
+                    obstacle_attrs,
+                    name=f"obstacle_{index}",
+                    pos="0 0 0",
+                    size=" ".join(map(str, obstacle_size)),
+                ),
             )
         with tempfile.NamedTemporaryFile(mode='wt', suffix=".xml", delete=False) as f:
             tree.write(f.name)
@@ -100,6 +142,31 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
         )
         if self.pov_camera_id == -1:
             raise ValueError("ant_env.xml must define a camera named 'pov'.")
+        self.obstacle_geom_ids = [
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f"obstacle_{index}")
+            for index in range(self.cfg.num_obstacles)
+        ]
+        self.obstacle_body_ids = [
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, f"obstacle_body_{index}")
+            for index in range(self.cfg.num_obstacles)
+        ]
+        if any(geom_id == -1 for geom_id in self.obstacle_geom_ids):
+            raise ValueError("Failed to create configured obstacle geoms.")
+        if any(body_id == -1 for body_id in self.obstacle_body_ids):
+            raise ValueError("Failed to create configured obstacle bodies.")
+        self.obstacle_mocap_ids = [
+            self.model.body_mocapid[body_id] for body_id in self.obstacle_body_ids
+        ]
+        if any(mocap_id == -1 for mocap_id in self.obstacle_mocap_ids):
+            raise ValueError("Configured obstacle bodies must be mocap bodies.")
+        for geom_id in self.obstacle_geom_ids:
+            if (
+                self.model.geom_contype[geom_id] != 1
+                or self.model.geom_conaffinity[geom_id] != 1
+                or self.model.geom_condim[geom_id] != 3
+            ):
+                raise ValueError("Configured obstacle geoms are not collidable.")
+        self.obstacle_positions = []
 
         # ------------ Observation and Action space ------------------
         # Create action space and observation space
@@ -265,6 +332,7 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
                 self.object.append(("heat", x, y))
 
         # Initialize previous drive for the paper's reward formula
+        self._reset_obstacles(qpos[:2], existing_items)
         self.prev_drive = self._calculate_drive()
 
         return self._get_obs()
@@ -295,11 +363,87 @@ class HomeostaticAntEnv(AntEnv, EzPickle):
             if np.linalg.norm(np.array([x, y]) - agent_pos) < self.cfg.object_spacing:
                 regen = True
                 continue
+            if not self._point_clear_of_obstacles(
+                np.array([x, y]), RESOURCE_MARKER_RADIUS + self.cfg.obstacle_clearance
+            ):
+                regen = True
+                continue
             for pos in existing:
                 if np.linalg.norm(np.array([x, y]) - np.array(pos)) < self.cfg.object_spacing:
                     regen = True
                     break
         return (type_gen, x, y)
+
+    def _point_clear_of_obstacles(self, point, clearance):
+        """Return whether a point stays outside every obstacle's footprint."""
+        half_x, half_y, _ = self.cfg.obstacle_size
+        point = np.asarray(point, dtype=np.float64)
+        for obstacle_pos in self.obstacle_positions:
+            delta = np.abs(point - obstacle_pos)
+            nearest_dx = max(delta[0] - half_x, 0.0)
+            nearest_dy = max(delta[1] - half_y, 0.0)
+            if np.hypot(nearest_dx, nearest_dy) < clearance:
+                return False
+        return True
+
+    def _reset_obstacles(self, agent_pos, resource_positions):
+        """Sample non-overlapping obstacle locations and update their geoms."""
+        self.obstacle_positions = []
+        if not self.obstacle_geom_ids:
+            return
+
+        half_x, half_y, half_z = self.cfg.obstacle_size
+        clearance = self.cfg.obstacle_clearance
+        x_limit = self.cfg.arena_size - WALL_HALF_THICKNESS - half_x - clearance
+        y_limit = self.cfg.arena_size - WALL_HALF_THICKNESS - half_y - clearance
+        if x_limit <= 0 or y_limit <= 0:
+            raise ValueError("Obstacle dimensions and clearance do not fit inside the arena.")
+
+        for mocap_id in self.obstacle_mocap_ids:
+            for _ in range(self.cfg.obstacle_placement_attempts):
+                candidate = np.array([
+                    self.np_random.uniform(-x_limit, x_limit),
+                    self.np_random.uniform(-y_limit, y_limit),
+                ])
+                if not self._candidate_obstacle_is_valid(candidate, agent_pos, resource_positions):
+                    continue
+                self.obstacle_positions.append(candidate)
+                self.data.mocap_pos[mocap_id] = (candidate[0], candidate[1], half_z)
+                break
+            else:
+                raise RuntimeError(
+                    "Unable to place all obstacles without overlapping resources, "
+                    "the ant spawn point, or another obstacle. Reduce the counts "
+                    "or sizes, or increase arena_size."
+                )
+
+        mujoco.mj_forward(self.model, self.data)
+
+    def _candidate_obstacle_is_valid(self, candidate, agent_pos, resource_positions):
+        """Check an obstacle footprint against circular items and other boxes."""
+        clearance = self.cfg.obstacle_clearance
+        if not self._point_clear_of_obstacle(candidate, agent_pos, self.cfg.object_spacing):
+            return False
+        for resource_pos in resource_positions:
+            if not self._point_clear_of_obstacle(
+                candidate, resource_pos, RESOURCE_MARKER_RADIUS + clearance
+            ):
+                return False
+
+        half_x, half_y, _ = self.cfg.obstacle_size
+        for obstacle_pos in self.obstacle_positions:
+            delta = np.abs(candidate - obstacle_pos)
+            if delta[0] < 2 * half_x + clearance and delta[1] < 2 * half_y + clearance:
+                return False
+        return True
+
+    def _point_clear_of_obstacle(self, obstacle_pos, point, clearance):
+        """Check a point's clearance from one obstacle footprint."""
+        half_x, half_y, _ = self.cfg.obstacle_size
+        delta = np.abs(np.asarray(point, dtype=np.float64) - obstacle_pos)
+        nearest_dx = max(delta[0] - half_x, 0.0)
+        nearest_dy = max(delta[1] - half_y, 0.0)
+        return np.hypot(nearest_dx, nearest_dy) >= clearance
 
     def _get_heat_sensor_obs(self):
         """
