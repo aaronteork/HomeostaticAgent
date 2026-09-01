@@ -114,10 +114,28 @@ def train_dreamer(args):
 
     # Use one optimizer for the combined Dreamer objective. Replay-value
     # gradients can then update both the critic and posterior representation.
+    # Keep learned loss-scale parameters in a separate group so they adapt
+    # faster without changing the learning rate of the policy or world model.
+    log_sigma_parameters = (
+        []
+        if world_model.weighted_loss is None
+        else list(world_model.weighted_loss.parameters())
+    )
+    log_sigma_parameter_ids = {id(parameter) for parameter in log_sigma_parameters}
+    main_parameters = [
+        parameter
+        for module in (world_model, actor, critic)
+        for parameter in module.parameters()
+        if id(parameter) not in log_sigma_parameter_ids
+    ]
     optimizer = LaProp(
-        list(world_model.parameters())
-        + list(actor.parameters())
-        + list(critic.parameters()),
+        [
+            {"params": main_parameters, "lr": cfg.laprop_lr},
+            {
+                "params": log_sigma_parameters,
+                "lr": cfg.laprop_lr * cfg.log_sigma_lr_multiplier,
+            },
+        ],
         lr=cfg.laprop_lr,
         eps=cfg.laprop_eps,
         betas=(cfg.laprop_beta1, cfg.laprop_beta2),

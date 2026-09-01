@@ -58,6 +58,9 @@ class DreamerConfig(EnvConfig):
     laprop_beta1: float = 0.9
     laprop_beta2: float = 0.999
     laprop_lr: float = 4e-5
+    # The learned reconstruction-loss scales are scalar parameters that can
+    # safely adapt faster than the world model, actor, and critic.
+    log_sigma_lr_multiplier: float = 5.0
     warmup_steps: int = 1000
     use_amp: bool = True
 
@@ -109,6 +112,8 @@ class DreamerConfig(EnvConfig):
             )
         if self.replay_context < 0:
             raise ValueError("replay_context must be non-negative")
+        if self.log_sigma_lr_multiplier <= 0.0:
+            raise ValueError("log_sigma_lr_multiplier must be positive")
         if self.actor_min_concentration < 1.0:
             raise ValueError(
                 "actor_min_concentration must be at least 1.0 so the Beta "
