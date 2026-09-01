@@ -506,7 +506,7 @@ def train_dreamer(args):
                             initial_stochastic=initial_stochastic,
                             initial_recurrent=initial_recurrent,
                             return_latents=True,
-                            harmony=world_model.harmony,
+                            weighted_loss=world_model.weighted_loss,
                         )
 
                     total_wm_loss += wm_loss.item()
@@ -596,18 +596,18 @@ def train_dreamer(args):
 
                     # Retain component-wise AGC statistics with the joint
                     # optimizer.
-                    harmony_parameter_ids = (
+                    weighted_loss_parameter_ids = (
                         set()
-                        if world_model.harmony is None
+                        if world_model.weighted_loss is None
                         else {
                             id(parameter)
-                            for parameter in world_model.harmony.parameters()
+                            for parameter in world_model.weighted_loss.parameters()
                         }
                     )
                     agc(
                         parameter
                         for parameter in world_model.parameters()
-                        if id(parameter) not in harmony_parameter_ids
+                        if id(parameter) not in weighted_loss_parameter_ids
                     )
                     agc(actor.parameters())
                     agc(critic.parameters())

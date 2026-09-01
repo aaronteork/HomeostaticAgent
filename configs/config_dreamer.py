@@ -29,15 +29,15 @@ class DreamerConfig(EnvConfig):
     gae_lambda: float = 0.95
 
     # Use Spatially-enhanced Recurrent Unit
-    use_sru: bool = True
+    use_sru: bool = False
 
-    # Rectified HarmonyDream loss mode. ``all`` independently moderates
+    # Weighted loss mode. ``all`` independently moderates
     # vision, proprioception, internal state, reward, and the combined KL.
     # ``all_except_kl`` learns the non-KL scales but retains Dreamer's fixed
     # KL strength. ``observations_only`` learns scales only for reconstruction
-    # heads. ``harmony`` follows the paper's observation/reward/KL grouping.
+    # heads. ``weighted`` follows the paper's observation/reward/KL grouping.
     # ``none`` preserves the fixed-weight Dreamer objective.
-    harmony_dream_loss: Literal[
+    weighted_loss: Literal[
         "none", "harmony", "all", "all_except_kl", "observations_only"
     ] = "observations_only"
 
@@ -96,7 +96,7 @@ class DreamerConfig(EnvConfig):
     critic_replay_loss: float = 0.3
 
     def __post_init__(self):
-        if self.harmony_dream_loss not in (
+        if self.weighted_loss not in (
             "none",
             "harmony",
             "all",
@@ -104,7 +104,7 @@ class DreamerConfig(EnvConfig):
             "observations_only",
         ):
             raise ValueError(
-                "harmony_dream_loss must be one of 'none', 'harmony', 'all', "
+                "weighted_loss must be one of 'none', 'harmony', 'all', "
                 "'all_except_kl', or 'observations_only'"
             )
         if self.replay_context < 0:
