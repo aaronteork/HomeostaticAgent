@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import csv
 import re
+import datetime as dt
 from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any
@@ -278,7 +279,7 @@ def main() -> None:
     checkpoint_results = []
     for step, checkpoint in find_checkpoints(checkpoint_dir):
         checkpoint = checkpoint.resolve()
-        print(f"Evaluating checkpoint step {step}: {checkpoint.name}", flush=True)
+        print(f"{dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Evaluating checkpoint step {step}: {checkpoint.name}", flush=True)
         checkpoint_results.append(evaluate_checkpoint(args, step, checkpoint))
 
     rows = []

@@ -25,7 +25,7 @@ class EnvConfig(BaseConfig):
     num_water: int = 4
     num_heat: int = 0
     # Solid box obstacles.  A value of zero preserves the original open arena.
-    num_obstacles: int = 20
+    num_obstacles: int = 0
     # MuJoCo box half-sizes: (x, y, z).
     obstacle_size: tuple[float, float, float] = (0.5, 0.5, 1.0)
     # Extra gap between an obstacle and resources, the ant spawn point, or

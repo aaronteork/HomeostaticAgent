@@ -16,6 +16,7 @@ import csv
 import re
 from pathlib import Path
 from typing import Any
+import datetime as dt
 
 import numpy as np
 import torch
@@ -197,7 +198,7 @@ def main() -> None:
     results = []
     for step, checkpoint in find_checkpoints(args.checkpoint_dir.resolve()):
         checkpoint = checkpoint.resolve()
-        print(f"Evaluating checkpoint {step}: {checkpoint.name}", flush=True)
+        print(f"{dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Evaluating checkpoint {step}: {checkpoint.name}", flush=True)
         results.append(evaluate_checkpoint(args, step, checkpoint))
     rows = []
     for result in results:

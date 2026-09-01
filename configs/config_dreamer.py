@@ -29,7 +29,7 @@ class DreamerConfig(EnvConfig):
     gae_lambda: float = 0.95
 
     # Use Spatially-enhanced Recurrent Unit
-    use_sru: bool = False
+    use_sru: bool = True
 
     # Rectified HarmonyDream loss mode. ``all`` independently moderates
     # vision, proprioception, internal state, reward, and the combined KL.
@@ -78,7 +78,7 @@ class DreamerConfig(EnvConfig):
     imagine_batch_size: int = 16
 
     # Actor
-    actor_policy: Literal["beta", "gaussian"] = "gaussian"
+    actor_policy: Literal["beta", "gaussian"] = "beta"
     actor_min_concentration: float = 1.0
     actor_outscale: float = 0.01
     actor_min_std: float = 0.1
