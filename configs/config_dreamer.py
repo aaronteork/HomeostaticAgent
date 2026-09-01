@@ -86,7 +86,7 @@ class DreamerConfig(EnvConfig):
     actor_outscale: float = 0.01
     actor_min_std: float = 0.1
     actor_max_std: float = 1.0
-    ent_coef: float = 0.005
+    ent_coef: float = 3e-4
 
     # Critic
     return_norm_rate: float = 0.01

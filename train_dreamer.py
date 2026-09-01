@@ -11,7 +11,7 @@ from torch.optim.lr_scheduler import LinearLR
 from configs.config_dreamer import DreamerConfig
 from utils.utils import set_seed
 from utils.agc import agc
-from utils.episode_telemetry import EpisodeTelemetry, RolloutTelemetryWindow
+from utils.episode_telemetry import EpisodeTelemetry  # RolloutTelemetryWindow
 from utils.laprop import LaProp
 from utils.replay_buffer_dreamer import SequenceReplayBuffer
 from utils.utils_dreamer import (
@@ -171,8 +171,7 @@ def train_dreamer(args):
     comparison_window_transitions = 0
     next_comparison_metrics_step = cfg.comparison_metrics_interval
     next_training_metrics_step = 0
-    next_rollout_metrics_step = cfg.rollout_metrics_interval
-    next_per_joint_metrics_step = cfg.per_joint_metrics_interval
+    next_weighted_loss_metrics_step = 0
     obs, info = env.reset(seed=cfg.seed)
     prev_action = torch.zeros(cfg.num_workers, cfg.action_space_dim, device=cfg.device)
     is_first = torch.ones(cfg.num_workers, device=cfg.device)
@@ -188,8 +187,6 @@ def train_dreamer(args):
     )  # Removed frame skip from the denominator for now
     replay_ratio_started = False
     episode_telemetry = EpisodeTelemetry(cfg.num_workers)
-    rollout_telemetry = RolloutTelemetryWindow(cfg.action_space_dim)
-    per_joint_telemetry = RolloutTelemetryWindow(cfg.action_space_dim)
 
     # Save untrained models before starting the training loop
     checkpoint_path = f"{model_directory}/dreamer_{timestamp}_chkpt{global_step}.pt"
@@ -304,7 +301,7 @@ def train_dreamer(args):
             next_obs, rewards, terminations, truncations, infos = env.step(env_action)
             episode_end = terminations | truncations
             valid_transitions = ~current_is_last
-            newly_flipped_workers = episode_telemetry.add_transition(
+            episode_telemetry.add_transition(
                 valid=valid_transitions,
                 rewards=rewards,
                 infos=infos,
@@ -313,19 +310,6 @@ def train_dreamer(args):
                 actor_loc=actor_loc,
                 actor_std=actor_std,
             )
-            if valid_transitions.any():
-                is_flipped = np.asarray(infos["is_flipped"], dtype=bool)
-            else:
-                is_flipped = np.zeros(cfg.num_workers, dtype=bool)
-            for telemetry_window in (rollout_telemetry, per_joint_telemetry):
-                telemetry_window.add_transition(
-                    valid=valid_transitions,
-                    raw_actions=action,
-                    executed_actions=env_action,
-                    actor_loc=actor_loc,
-                    actor_std=actor_std,
-                    is_flipped=is_flipped,
-                )
 
             obs = next_obs
             next_is_first = current_is_last
@@ -371,7 +355,7 @@ def train_dreamer(args):
             comparison_heartbeat_due = (
                 env_transition_step >= next_comparison_metrics_step
             )
-            if completed_this_step or comparison_heartbeat_due:
+            if comparison_heartbeat_due:
                 comparison_metrics = {
                     "comparison/env_transition_step": float(env_transition_step),
                     "comparison/cumulative_episode_ends": float(
@@ -384,65 +368,21 @@ def train_dreamer(args):
                         cumulative_truncations
                     ),
                 }
-                if comparison_heartbeat_due:
-                    comparison_metrics[
-                        "comparison/episode_end_rate_per_million"
-                    ] = (
-                        1_000_000.0
-                        * comparison_window_episode_ends
-                        / comparison_window_transitions
-                        if comparison_window_transitions
-                        else 0.0
-                    )
-                    comparison_window_episode_ends = 0
-                    comparison_window_transitions = 0
-                    while env_transition_step >= next_comparison_metrics_step:
-                        next_comparison_metrics_step += (
-                            cfg.comparison_metrics_interval
-                        )
+                comparison_metrics["comparison/episode_end_rate_per_million"] = (
+                    1_000_000.0
+                    * comparison_window_episode_ends
+                    / comparison_window_transitions
+                    if comparison_window_transitions
+                    else 0.0
+                )
+                comparison_window_episode_ends = 0
+                comparison_window_transitions = 0
+                while env_transition_step >= next_comparison_metrics_step:
+                    next_comparison_metrics_step += cfg.comparison_metrics_interval
                 mlflow.log_metrics(comparison_metrics, step=env_transition_step)
 
-            if newly_flipped_workers.size:
-                flip_rows = newly_flipped_workers
-                mlflow.log_metrics(
-                    {
-                        "flip_event/new_first_flip_count": float(flip_rows.size),
-                        "flip_event/episode_age_mean": float(
-                            episode_telemetry.episode_age[flip_rows].mean()
-                        ),
-                        "flip_event/posture_mean": float(
-                            np.asarray(infos["posture"])[flip_rows].mean()
-                        ),
-                        "flip_event/actor_std_mean": float(
-                            actor_std[flip_rows].mean()
-                        ),
-                        "flip_event/raw_action_clip_coordinate_fraction": float(
-                            (np.abs(action[flip_rows]) > 1.0).mean()
-                        ),
-                    },
-                    step=env_transition_step,
-                )
-
-            if env_transition_step >= next_rollout_metrics_step:
-                rollout_metrics = rollout_telemetry.summary()
-                rollout_metrics.update(episode_telemetry.active_survival_metrics())
-                rollout_metrics.update(
-                    {
-                        "rollout/env_transition_step": float(env_transition_step),
-                        "rollout/dreamer_global_step": float(global_step),
-                    }
-                )
-                mlflow.log_metrics(rollout_metrics, step=env_transition_step)
-                while env_transition_step >= next_rollout_metrics_step:
-                    next_rollout_metrics_step += cfg.rollout_metrics_interval
-
-            if env_transition_step >= next_per_joint_metrics_step:
-                mlflow.log_metrics(
-                    per_joint_telemetry.per_joint_summary(),
-                    step=env_transition_step,
-                )
-                while env_transition_step >= next_per_joint_metrics_step:
-                    next_per_joint_metrics_step += cfg.per_joint_metrics_interval
+            # Rollout and per-joint telemetry are disabled here because they
+            # retain every sampled transition until their next summary.
 
             actor_loss = None
             critic_loss = None
@@ -674,11 +614,30 @@ def train_dreamer(args):
                             {
                                 f"train_update/{key.removeprefix('world_model/')}": value
                                 for key, value in wm_metrics.items()
+                                if "_coefficient" not in key
                             },
                             step=global_step,
                         )
                         while global_step >= next_training_metrics_step:
                             next_training_metrics_step += cfg.train_metrics_interval
+
+                    if (
+                        world_model.weighted_loss is not None
+                        and global_step >= next_weighted_loss_metrics_step
+                    ):
+                        mlflow.log_metrics(
+                            {
+                                f"loss_weights/{name}_coefficient": float(
+                                    torch.exp(-log_sigma.detach()).item()
+                                )
+                                for name, log_sigma in world_model.weighted_loss.log_sigmas.items()
+                            },
+                            step=global_step,
+                        )
+                        while global_step >= next_weighted_loss_metrics_step:
+                            next_weighted_loss_metrics_step += (
+                                cfg.checkpoint_save_interval
+                            )
 
             # Log finished episodes and carry the step outcome to the next
             # replay row, where it is aligned with the resulting observation.

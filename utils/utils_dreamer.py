@@ -330,7 +330,7 @@ def compute_world_model_loss(
     kl_loss = config.dyn_loss_weight * dyn_loss + config.rep_loss_weight * rep_loss
 
     # ===== Combined Loss with Weighting =====
-    weighted_loss_metrics = {}
+    weighted_metrics = {}
     if config.weighted_loss == "none":
         loss = (
             recon_loss
@@ -371,12 +371,12 @@ def compute_world_model_loss(
             }
             if config.weighted_loss == "all_except_kl":
                 weighted_loss_terms["reward"] = reward_loss
-        weighted_loss = torch.zeros((), device=reward_loss.device)
+        learned_weighted_loss = torch.zeros((), device=reward_loss.device)
         for name, raw_loss in weighted_loss_terms.items():
-            term, coefficient, regularizer, weighted_loss = _rectified_weighted_term(
+            term, coefficient, regularizer, weighted_term = _rectified_weighted_term(
                 raw_loss, weighted_loss.log_sigmas[name]
             )
-            weighted_loss = weighted_loss + term
+            learned_weighted_loss = learned_weighted_loss + term
             weighted_metrics.update(
                 {
                     f"world_model/weighted_{name}_raw_loss": raw_loss.detach().item(),
@@ -385,7 +385,7 @@ def compute_world_model_loss(
                     ].detach().item(),
                     f"world_model/weighted_{name}_coefficient": coefficient.detach().item(),
                     f"world_model/weighted_{name}_regularizer": regularizer.detach().item(),
-                    f"world_model/weighted_{name}_weighted_loss": weighted_loss.detach().item(),
+                    f"world_model/weighted_{name}_weighted_loss": weighted_term.detach().item(),
                 }
             )
         # Continuation remains a fixed auxiliary term in this homeostatic-only,
@@ -397,7 +397,7 @@ def compute_world_model_loss(
             fixed_loss = fixed_loss + kl_loss
         if config.weighted_loss == "observations_only":
             fixed_loss = fixed_loss + config.reward_weight * reward_loss
-        loss = weighted_loss + fixed_loss
+        loss = learned_weighted_loss + fixed_loss
 
     metrics = {
         "world_model/total_loss": loss.item(),
